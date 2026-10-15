@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an feature or idea for this dnsrace
+about: Suggest an feature or idea for dnsrace
 title: ''
 labels: ''
 assignees: Yousef-Mohamed22
