@@ -1,16 +1,22 @@
 [package]
 name = "dnsrace"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Race DNS servers from your own connection and find the fastest one for your location"
 license = "MIT"
 readme = "README.md"
-keywords = ["dns", "benchmark", "network", "latency"]
+repository = "https://github.com/Yousef-Mohamed22/dnsrace"
+homepage = "https://github.com/Yousef-Mohamed22/dnsrace"
+keywords = ["dns", "benchmark", "latency", "network", "cli"]
 categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 ureq = { version = "2", features = ["native-certs"] }
+
+[dev-dependencies]
+serde_json = "1"
 
 [profile.release]
 opt-level = 3
