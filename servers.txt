@@ -1,13 +1,9 @@
 # dnsrace server list
 #
-# One server per line:  <address> <name>
-#   - address: IPv4 (1.1.1.1) or IPv6 (2606:4700:4700::1111); add a port when it is not 53:
-#              1.1.1.1:5353 or [2606:4700:4700::1111]:5353
-#   - name:    no spaces (use dashes); servers from the same operator share a name
+# One server per line:  <IPv4 address> <name>
+#   - the name has no spaces (use dashes); servers with the same name are grouped by operator
 #   - lines starting with # and empty lines are ignored
-#
-# Servers that can't be reached from your connection (for example IPv6 on an IPv4-only
-# network) are dropped automatically, so listing them is harmless.
+#   - IPv4 only for now
 #
 # To add a server: append a line and open a pull request.
 # Please only add public resolvers run by an identifiable operator (with a web page that says so).
@@ -109,54 +105,3 @@
 # Quad101 (TWNIC)
 101.101.101.101 Quad101
 101.102.103.104 Quad101
-
-# ---- IPv6 ----
-
-# Gcore
-2a03:90c0:999d::1 Gcore
-2a03:90c0:9992::1 Gcore
-
-# Cloudflare
-2606:4700:4700::1111 Cloudflare
-2606:4700:4700::1001 Cloudflare
-2606:4700:4700::1112 Cloudflare-malware
-2606:4700:4700::1002 Cloudflare-malware
-2606:4700:4700::1113 Cloudflare-family
-2606:4700:4700::1003 Cloudflare-family
-
-# Google
-2001:4860:4860::8888 Google
-2001:4860:4860::8844 Google
-
-# Quad9
-2620:fe::fe Quad9
-2620:fe::9 Quad9
-2620:fe::10 Quad9-unfiltered
-2620:fe::fe:10 Quad9-unfiltered
-2620:fe::11 Quad9-ECS
-2620:fe::fe:11 Quad9-ECS
-
-# OpenDNS (Cisco)
-2620:119:35::35 OpenDNS
-2620:119:53::53 OpenDNS
-
-# AdGuard
-2a10:50c0::ad1:ff AdGuard
-2a10:50c0::ad2:ff AdGuard
-2a10:50c0::1:ff AdGuard-unfiltered
-2a10:50c0::2:ff AdGuard-unfiltered
-
-# CleanBrowsing
-2a0d:2a00:1::2 CleanBrowsing
-2a0d:2a00:2::2 CleanBrowsing
-
-# DNS.SB
-2a09:: DNS.SB
-2a11:: DNS.SB
-
-# Mullvad
-2a07:e340::2 Mullvad
-
-# Control D
-2606:1a40:: ControlD
-2606:1a40:1:: ControlD
