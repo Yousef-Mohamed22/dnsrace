@@ -54,17 +54,56 @@ dnsrace --json > result.json   # machine-readable results
 Example output (trimmed; the numbers are illustrative, based on a real run; yours will differ):
 
 ```
+== Cloudflare data center you reach (first 3 letters = nearest city's airport code, e.g. cai = Cairo, mrs = Marseille, fra = Frankfurt) ==
+mrs07
+
+Your current DNS: 163.121.128.134 163.121.128.135 192.168.1.1
+
+Stage 1: quick scan of 88 candidates...
+53 answered.
+
+Stage 2: full test of 30 servers (16 at a time)...
+                                        
 == Results: average of the cached and uncached medians, lower is better ==
- 1. 192.168.1.1          Router/ISP-default  cached    5.0 ms  uncached   54.0 ms  timeouts 0
- ...
- 3. 1.1.1.1              Cloudflare          cached   45.0 ms  uncached   66.0 ms  timeouts 0
- 4. 2606:4700:4700::1111 Cloudflare          cached   47.0 ms  uncached   67.0 ms  timeouts 0
- ...
-16. 2.56.220.2           Gcore               cached   54.0 ms  uncached   68.0 ms  timeouts 0  <== current
- ...
+ 1. 192.168.1.1     Router/ISP-default   cached    1.1 ms  uncached   52.8 ms  timeouts 1  <== current
+ 2. 163.121.128.135 current              cached    3.9 ms  uncached   52.2 ms  timeouts 0  <== current
+ 3. 163.121.128.134 current              cached    3.8 ms  uncached   52.4 ms  timeouts 1  <== current
+ 4. 1.1.1.1         Cloudflare           cached   45.3 ms  uncached   62.9 ms  timeouts 0
+ 5. 1.0.0.1         Cloudflare           cached   45.8 ms  uncached   66.5 ms  timeouts 0
+ 6. 1.0.0.3         Cloudflare-family    cached   46.5 ms  uncached   65.9 ms  timeouts 0
+ 7. 1.0.0.2         Cloudflare-malware   cached   46.9 ms  uncached   66.7 ms  timeouts 0
+ 8. 8.8.8.8         Google               cached   51.7 ms  uncached   62.5 ms  timeouts 0
+ 9. 1.1.1.3         Cloudflare-family    cached   46.2 ms  uncached   68.2 ms  timeouts 0
+10. 76.76.10.0      ControlD             cached   57.0 ms  uncached   58.1 ms  timeouts 1
+11. 149.112.112.112 Quad9                cached   53.2 ms  uncached   62.1 ms  timeouts 0
+12. 185.228.169.9   CleanBrowsing        cached   55.3 ms  uncached   61.2 ms  timeouts 7
+13. 1.1.1.2         Cloudflare-malware   cached   46.5 ms  uncached   70.8 ms  timeouts 0
+14. 185.228.168.168 CleanBrowsing-family cached   55.5 ms  uncached   65.6 ms  timeouts 7
+15. 195.46.39.39    SafeDNS              cached   55.9 ms  uncached   66.2 ms  timeouts 0
+16. 195.46.39.40    SafeDNS              cached   56.4 ms  uncached   68.6 ms  timeouts 0
+17. 8.8.4.4         Google               cached   53.4 ms  uncached   73.3 ms  timeouts 0
+18. 4.2.2.1         Level3               cached   62.5 ms  uncached   66.6 ms  timeouts 0
+19. 209.244.0.4     Level3               cached   62.7 ms  uncached   69.8 ms  timeouts 0
+20. 94.140.14.141   AdGuard-unfiltered   cached   62.2 ms  uncached   71.3 ms  timeouts 0
+21. 94.140.14.140   AdGuard-unfiltered   cached   61.8 ms  uncached   74.0 ms  timeouts 0
+22. 94.140.15.15    AdGuard              cached   61.6 ms  uncached   74.3 ms  timeouts 0
+23. 94.140.14.14    AdGuard              cached   61.7 ms  uncached   80.0 ms  timeouts 1
+24. 64.6.64.6       Verisign             cached   59.9 ms  uncached   87.1 ms  timeouts 0
+25. 74.82.42.42     HurricaneElectric    cached   56.5 ms  uncached  133.2 ms  timeouts 0
+26. 149.112.112.11  Quad9-ECS            cached   64.7 ms  uncached  135.4 ms  timeouts 0
+27. 149.112.112.10  Quad9-unfiltered     cached   93.8 ms  uncached  142.5 ms  timeouts 0
+28. 185.228.168.9   CleanBrowsing        cached   55.2 ms  uncached       n/a  timeouts 8  UNRELIABLE
+29. 8.20.247.20     Comodo               cached   62.3 ms  uncached       n/a  timeouts 8  UNRELIABLE
+30. 84.200.69.80    DNS.WATCH            cached   66.7 ms  uncached       n/a  timeouts 8  UNRELIABLE
+
 Fastest overall:        192.168.1.1 (Router/ISP-default)
 Fastest known provider: 1.1.1.1 (Cloudflare)
-Your current DNS:       #16 (2.56.220.2) of 26 tested
+Your current DNS:       #1 (192.168.1.1), #2 (163.121.128.135), #3 (163.121.128.134) of 30 tested
+
+A DNS server sees every site you visit and can return fake answers, so only switch to one you trust.
+How to switch: see 'Use the winner' in the README.
+Done in 13.3s.
+
 ```
 
 - **cached**: median of 30 lookups of popular sites. Mostly measures how far away the server is.
