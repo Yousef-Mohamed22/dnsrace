@@ -1,6 +1,7 @@
 //! Turns results into text and JSON. Everything here returns strings, so it is easy to test.
 
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::net::IpAddr;
 
 use crate::bench::{Note, Row, SteerEntry, Steering};
@@ -49,6 +50,19 @@ fn is_current(row: &Row, current: &HashSet<IpAddr>) -> bool {
     row.addr.port() == 53 && current.contains(&row.addr.ip())
 }
 
+/// Bounds both name processing and padding, including any expanded control escapes.
+fn table_name(name: &str) -> String {
+    const MAX_NAME_WIDTH: usize = 64;
+    let prefix: String = name.chars().take(MAX_NAME_WIDTH + 1).collect();
+    let text = terminal_text(&prefix);
+    if text.chars().count() > MAX_NAME_WIDTH {
+        let prefix: String = text.chars().take(MAX_NAME_WIDTH - 3).collect();
+        format!("{prefix}...")
+    } else {
+        text
+    }
+}
+
 /// The ranked table, one line per server.
 pub fn table(rows: &[Row], current: &HashSet<IpAddr>, color: bool) -> String {
     let addr_w = rows
@@ -57,11 +71,15 @@ pub fn table(rows: &[Row], current: &HashSet<IpAddr>, color: bool) -> String {
         .max()
         .unwrap_or(0)
         .max(15);
-    let names: Vec<String> = rows.iter().map(|r| terminal_text(&r.name)).collect();
-    let name_w = names.iter().map(String::len).max().unwrap_or(0).max(8);
-    let mut lines = vec![
-        "== Results: average of the cached and uncached medians, lower is better ==".to_string(),
-    ];
+    let names: Vec<String> = rows.iter().map(|r| table_name(&r.name)).collect();
+    let name_w = names
+        .iter()
+        .map(|n| n.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+    let mut text =
+        "== Results: average of the cached and uncached medians, lower is better ==".to_string();
     for (i, r) in rows.iter().enumerate() {
         let flag = match r.note {
             Note::Ok => String::new(),
@@ -73,8 +91,9 @@ pub fn table(rows: &[Row], current: &HashSet<IpAddr>, color: bool) -> String {
         } else {
             String::new()
         };
-        lines.push(format!(
-            "{:>2}. {:<addr_w$} {:<name_w$} cached {}  uncached {}  timeouts {}{}{}",
+        write!(
+            text,
+            "\n{:>2}. {:<addr_w$} {:<name_w$} cached {}  uncached {}  timeouts {}{}{}",
             i + 1,
             fmt_addr(r.addr),
             names[i],
@@ -83,9 +102,10 @@ pub fn table(rows: &[Row], current: &HashSet<IpAddr>, color: bool) -> String {
             r.timeouts,
             flag,
             marker,
-        ));
+        )
+        .expect("writing to a string cannot fail");
     }
-    lines.join("\n")
+    text
 }
 
 fn label(row: Option<&Row>) -> String {
@@ -382,6 +402,50 @@ mod tests {
             plain
         );
         assert!(!plain.chars().any(|c| c.is_control() && c != '\n'));
+    }
+
+    #[test]
+    fn table_bounds_padding_from_one_long_server_name() {
+        let mut rows = vec![row("1.1.1.1", "Short", None, None, 0, Note::Ok); 128];
+        rows[0].name = "x".repeat(32_768);
+        let text = table(&rows, &HashSet::new(), false);
+        assert!(text.len() < rows.len() * 256);
+        assert!(text.contains(&format!("{}... cached", "x".repeat(61))));
+        assert_eq!(text.lines().count(), rows.len() + 1);
+    }
+
+    #[test]
+    fn table_bounds_escaped_names_at_character_boundaries() {
+        for name in [
+            "x".repeat(63),
+            "x".repeat(64),
+            "x".repeat(65),
+            "é".repeat(65),
+            "\x1b".repeat(65),
+        ] {
+            let rows = vec![
+                row("1.1.1.1", &name, None, None, 0, Note::Ok),
+                row("9.9.9.9", "Plain", None, None, 0, Note::Ok),
+            ];
+            let text = table(&rows, &HashSet::new(), false);
+            let lines: Vec<&str> = text.lines().skip(1).collect();
+            let columns: Vec<usize> = lines
+                .iter()
+                .map(|l| l[..l.find("cached").unwrap()].chars().count())
+                .collect();
+            assert!(columns[0] <= 85);
+            assert_eq!(columns[0], columns[1]);
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+            if name.chars().count() <= 64 {
+                assert!(lines[0].contains(&format!("{name} ")));
+            } else {
+                assert!(lines[0].contains("... cached"));
+            }
+            // Display truncation must leave the original value available in JSON.
+            let decoded: serde_json::Value =
+                serde_json::from_str(&json("0.3.0", None, &rows, &HashSet::new(), None)).unwrap();
+            assert_eq!(decoded["results"][0]["name"], name);
+        }
     }
 
     #[test]
