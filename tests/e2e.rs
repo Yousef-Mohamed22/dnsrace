@@ -150,6 +150,47 @@ async fn json_output_is_valid_and_stdout_is_only_json() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_list_names_are_safe_in_reports_and_preserved_in_json() {
+    let server = spawn_mock("127.0.0.1:0", Behavior::new(0, 0))
+        .await
+        .expect("bind");
+    let name = "DNS\x1b]52;c;Y2xpcA==\x07\x1b[2J\x7f\u{9d}";
+    let list = TempFile::with(&format!("{} {name}\n", server.addr));
+    for mode in ["--no-color", "--json"] {
+        let out = run_dnsrace(&["--servers", &list.arg(), "--no-detect", mode]).await;
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        for text in [&out.stdout, &out.stderr] {
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+        }
+        if mode == "--json" {
+            let decoded: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+            assert_eq!(decoded["results"][0]["name"], name);
+        } else {
+            assert_eq!(
+                out.stdout
+                    .matches("DNS\\u{1b}]52;c;Y2xpcA==\\u{7}\\u{1b}[2J\\u{7f}\\u{9d}")
+                    .count(),
+                3
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn stderr_diagnostics_escape_untrusted_values() {
+    let payload = "dnsrace-missing-\x1b]52;c;Y2xpcA==\x07";
+    for args in [vec![payload], vec!["--servers", payload, "--json"]] {
+        let out = run_dnsrace(&args).await;
+        assert_ne!(out.code, 0);
+        assert!(out.stdout.is_empty());
+        assert!(out
+            .stderr
+            .contains("dnsrace-missing-\\u{1b}]52;c;Y2xpcA==\\u{7}"));
+        assert!(!out.stderr.chars().any(|c| c.is_control() && c != '\n'));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ipv6_servers_work_where_the_machine_supports_ipv6() {
     let Some(v6) = spawn_mock("[::1]:0", Behavior::new(3, 40)).await else {
         eprintln!("skipping: no IPv6 loopback on this machine");

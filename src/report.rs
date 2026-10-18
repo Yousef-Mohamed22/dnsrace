@@ -7,6 +7,27 @@ use crate::bench::{Note, Row, SteerEntry, Steering};
 use crate::servers::{fmt_addr, is_known};
 use crate::util::median;
 
+/// Makes untrusted values safe to embed in terminal text, before adding layout or colors.
+pub fn terminal_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The data-center announcement, also used on stderr with `--json`.
+pub fn data_center_text(code: &str) -> String {
+    format!(
+        "== Cloudflare data center you reach (first 3 letters = nearest city's airport code, e.g. cai = Cairo, mrs = Marseille, fra = Frankfurt) ==\n{}\n",
+        terminal_text(code)
+    )
+}
+
 /// A time in ms, or `n/a` when it could not be measured.
 pub fn fmt_ms(v: Option<f64>) -> String {
     match v {
@@ -36,7 +57,8 @@ pub fn table(rows: &[Row], current: &HashSet<IpAddr>, color: bool) -> String {
         .max()
         .unwrap_or(0)
         .max(15);
-    let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max(8);
+    let names: Vec<String> = rows.iter().map(|r| terminal_text(&r.name)).collect();
+    let name_w = names.iter().map(String::len).max().unwrap_or(0).max(8);
     let mut lines = vec![
         "== Results: average of the cached and uncached medians, lower is better ==".to_string(),
     ];
@@ -55,7 +77,7 @@ pub fn table(rows: &[Row], current: &HashSet<IpAddr>, color: bool) -> String {
             "{:>2}. {:<addr_w$} {:<name_w$} cached {}  uncached {}  timeouts {}{}{}",
             i + 1,
             fmt_addr(r.addr),
-            r.name,
+            names[i],
             fmt_ms(r.cached),
             fmt_ms(r.uncached),
             r.timeouts,
@@ -67,7 +89,7 @@ pub fn table(rows: &[Row], current: &HashSet<IpAddr>, color: bool) -> String {
 }
 
 fn label(row: Option<&Row>) -> String {
-    row.map(|r| format!("{} ({})", fmt_addr(r.addr), r.name))
+    row.map(|r| format!("{} ({})", fmt_addr(r.addr), terminal_text(&r.name)))
         .unwrap_or_else(|| "-".to_string())
 }
 
@@ -167,7 +189,7 @@ fn jstr(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -297,6 +319,80 @@ mod tests {
             row("9.9.9.9", "Quad9", None, None, 8, Note::Unreliable),
             row("5.5.5.5", "other", Some(2.0), Some(3.0), 0, Note::Hijacks),
         ]
+    }
+
+    #[test]
+    fn terminal_values_escape_controls_and_preserve_printable_text() {
+        let printable = r#"DNS café \ "quoted""#;
+        assert_eq!(terminal_text(printable), printable);
+        assert_eq!(
+            terminal_text("\x1b]52;c;Y2xpcA==\x07\r\n\t\x7f\u{9b}2J"),
+            "\\u{1b}]52;c;Y2xpcA==\\u{7}\\r\\n\\t\\u{7f}\\u{9b}2J"
+        );
+        for c in ('\0'..='\u{1f}').chain('\u{7f}'..='\u{9f}') {
+            let text = terminal_text(&c.to_string());
+            assert!(text.starts_with('\\'));
+            assert!(!text.chars().any(char::is_control));
+        }
+    }
+
+    #[test]
+    fn data_center_announcement_escapes_txt_controls() {
+        let text = data_center_text("mrs04\r\n\x1b]52;c;Y2xpcA==\x07");
+        assert!(text.ends_with("\nmrs04\\r\\n\\u{1b}]52;c;Y2xpcA==\\u{7}\n"));
+        assert_eq!(text.lines().count(), 2);
+        assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+    }
+
+    #[test]
+    fn reports_escape_names_before_padding_and_adding_colors() {
+        let rows = vec![
+            row(
+                "1.1.1.1",
+                "Bad\x1b[2J\x07",
+                Some(1.0),
+                Some(2.0),
+                0,
+                Note::Ok,
+            ),
+            row("9.9.9.9", "Plain", None, None, 8, Note::Unreliable),
+        ];
+        let current = HashSet::new();
+        let plain = table(&rows, &current, false);
+        assert!(plain.contains("Bad\\u{1b}[2J\\u{7}"));
+        // Padding uses the visible escaped name, so the following columns still line up.
+        let columns: Vec<usize> = plain
+            .lines()
+            .skip(1)
+            .map(|l| l.find("cached").unwrap())
+            .collect();
+        assert_eq!(columns[0], columns[1]);
+        assert_eq!(
+            table(&rows, &current, true)
+                .replace("\x1b[31m", "")
+                .replace("\x1b[0m", ""),
+            plain
+        );
+        let plain = summary(&rows, &current, false);
+        assert_eq!(plain.matches("Bad\\u{1b}[2J\\u{7}").count(), 2);
+        assert_eq!(
+            summary(&rows, &current, true)
+                .replace("\x1b[1;32m", "")
+                .replace("\x1b[0m", ""),
+            plain
+        );
+        assert!(!plain.chars().any(|c| c.is_control() && c != '\n'));
+    }
+
+    #[test]
+    fn json_preserves_untrusted_values_without_literal_controls() {
+        let value = "DNS\x1b]52;c;Y2xpcA==\x07\r\n\t\x7f\u{9b}\u{9d}\\\"";
+        let rows = vec![row("1.1.1.1", value, Some(1.0), Some(2.0), 0, Note::Ok)];
+        let text = json("0.3.0", Some(value), &rows, &HashSet::new(), None);
+        assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+        let decoded: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(decoded["data_center"], value);
+        assert_eq!(decoded["results"][0]["name"], value);
     }
 
     #[test]

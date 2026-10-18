@@ -36,7 +36,11 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(CliError::Usage(message)) => {
-            let _ = writeln!(std::io::stderr(), "dnsrace: {message}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "dnsrace: {}",
+                report::terminal_text(&message)
+            );
             return ExitCode::from(2);
         }
     };
