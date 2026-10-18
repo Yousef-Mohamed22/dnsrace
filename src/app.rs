@@ -141,8 +141,9 @@ pub async fn run(cfg: Config) -> u8 {
             Ok(text) => text,
             Err(e) => {
                 out.note(&format!(
-                    "dnsrace: cannot read the server list {}: {e}",
-                    path.display()
+                    "dnsrace: cannot read the server list {}: {}",
+                    report::terminal_text(&path.display().to_string()),
+                    report::terminal_text(&e.to_string())
                 ));
                 return 1;
             }
@@ -164,9 +165,7 @@ pub async fn run(cfg: Config) -> u8 {
         fetch_lists(&cfg.countries),
     );
     if let Some(code) = &data_center {
-        out.say(&format!(
-            "== Cloudflare data center you reach (first 3 letters = nearest city's airport code, e.g. cai = Cairo, mrs = Marseille, fra = Frankfurt) ==\n{code}\n"
-        ));
+        out.say(&report::data_center_text(code));
     }
 
     // the candidates: the list, your router, your current DNS, --add, then the country lists
@@ -194,7 +193,8 @@ pub async fn run(cfg: Config) -> u8 {
                 }
             }
             Err(e) => out.note(&format!(
-                "note: could not download the '{cc}' list from public-dns.info: {e}"
+                "note: could not download the '{cc}' list from public-dns.info: {}",
+                report::terminal_text(&e)
             )),
         }
     }
