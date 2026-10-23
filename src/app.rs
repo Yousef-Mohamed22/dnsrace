@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::task::JoinSet;
 
-use crate::bench::{self, Note};
+use crate::bench;
 use crate::cli::{Config, Family, OutputFormat};
 use crate::dns::DohProvider;
 use crate::report;
@@ -369,34 +369,21 @@ pub async fn run(cfg: Config) -> u8 {
     .await;
     out.clear_progress();
 
-    // optional: where does a site get steered? (not part of the CSV shape)
-    let steering = if !cfg.host.is_empty()
-        && cfg.format != OutputFormat::Quiet
-        && cfg.format != OutputFormat::Csv
-    {
-        let top: Vec<SocketAddr> = rows
-            .iter()
-            .filter(|r| r.note == Note::Ok)
-            .take(10)
-            .map(|r| r.addr)
-            .collect();
-        let want_v6 = scan.iter().any(|(c, _)| c.addr.is_ipv6());
-        let mut set = JoinSet::new();
-        let connect_port = cfg.connect_port;
-        for host in &cfg.host {
-            let host = host.clone();
-            let top = top.clone();
-            set.spawn(async move { bench::steering(&host, &top, connect_port, want_v6).await });
-        }
-        let mut results = Vec::new();
-        while let Some(res) = set.join_next().await {
-            if let Ok(s) = res {
-                results.push(s);
-            }
-        }
-        Some(results.remove(0))
+    // optional: where do the requested sites get steered? (not part of the CSV shape)
+    let wants_steering = !cfg.host.is_empty()
+        && (matches!(cfg.format, OutputFormat::Table | OutputFormat::Json)
+            || cfg.export_json.is_some()
+            || cfg.export_html.is_some());
+    if !cfg.host.is_empty() && !wants_steering {
+        out.info(
+            "note: steering checks are not included in CSV or quiet output; use --json, --export-json or --export-html to include them.",
+        );
+    }
+    let steerings = if wants_steering {
+        let want_v6 = matches!(cfg.family, Family::Any | Family::V6);
+        bench::steerings(&cfg.host, &rows, cfg.connect_port, want_v6).await
     } else {
-        None
+        Vec::new()
     };
 
     let current: HashSet<IpAddr> = current_ips.iter().copied().collect();
@@ -405,7 +392,7 @@ pub async fn run(cfg: Config) -> u8 {
         data_center.as_deref(),
         &rows,
         &current,
-        steering.as_ref(),
+        &steerings,
     );
     let csv_output = report::csv(&rows, &current);
 
@@ -437,7 +424,7 @@ pub async fn run(cfg: Config) -> u8 {
                 out.say("");
                 out.say(&report::details(&rows[..shown]));
             }
-            if let Some(s) = &steering {
+            for s in &steerings {
                 out.say("");
                 out.say(&report::steering_text(s));
             }
@@ -463,7 +450,7 @@ pub async fn run(cfg: Config) -> u8 {
             data_center.as_deref(),
             &rows,
             &current,
-            steering.as_ref(),
+            &steerings,
         );
         match std::fs::write(path, &html) {
             Ok(()) => out.info(&format!("wrote HTML report to {}", path.display())),

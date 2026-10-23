@@ -114,7 +114,7 @@ pub async fn spawn_mock(bind: &str, behavior: Behavior) -> Option<Mock> {
                 } else {
                     (3, vec![]) // NXDOMAIN
                 }
-            } else if name == "steer.test" {
+            } else if name == "steer.test" || name == "steer2.test" {
                 (0, vec![Ipv4Addr::LOCALHOST])
             } else {
                 (0, vec![Ipv4Addr::new(198, 51, 100, 7)])

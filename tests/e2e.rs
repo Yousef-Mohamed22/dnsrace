@@ -60,6 +60,7 @@ async fn ranks_flags_and_steers() {
         "--connect-port",
         &tcp_port,
         "steer.test",
+        "steer2.test",
     ])
     .await;
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
@@ -102,6 +103,11 @@ async fn ranks_flags_and_steers() {
         "{steer}"
     );
     assert!(steer.contains("returned by 2 of 2 servers"), "{steer}");
+    assert!(text.contains("== steer2.test:"), "{text}");
+    assert!(
+        position(text, "== steer.test:") < position(text, "== steer2.test:"),
+        "{text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -121,6 +127,7 @@ async fn json_output_is_valid_and_stdout_is_only_json() {
         "--json",
         "--timeout",
         "500",
+        "steer.test",
     ])
     .await;
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
@@ -145,11 +152,59 @@ async fn json_output_is_valid_and_stdout_is_only_json() {
     assert_eq!(v["recommended"], fast.addr.to_string());
     assert_eq!(v["fastest"], fast.addr.to_string());
     assert_eq!(v["fastest_known"], fast.addr.to_string());
-    assert!(v["steering"].is_null());
+    assert_eq!(v["steering"]["host"], "steer.test");
+    assert_eq!(v["steerings"].as_array().unwrap().len(), 1);
+    assert_eq!(v["steerings"][0]["host"], "steer.test");
 
     // progress text stays out of the JSON stream
     assert!(out.stderr.contains("Stage 1:"), "{}", out.stderr);
     assert!(!out.stdout.contains("Stage 1:"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exports_write_json_csv_and_html_reports() {
+    let fast = spawn_mock("127.0.0.1:0", Behavior::new(2, 40))
+        .await
+        .expect("bind");
+    let mid = spawn_mock("127.0.0.1:0", Behavior::new(120, 160))
+        .await
+        .expect("bind");
+    let list = TempFile::with(&format!("{} Fast\n{} Mid\n", fast.addr, mid.addr));
+    let json_path = TempFile::with("");
+    let csv_path = TempFile::with("");
+    let html_path = TempFile::with("");
+
+    let out = run_dnsrace(&[
+        "--servers",
+        &list.arg(),
+        "--no-detect",
+        "--no-color",
+        "--timeout",
+        "500",
+        "--export-json",
+        &json_path.arg(),
+        "--export-csv",
+        &csv_path.arg(),
+        "--export-html",
+        &html_path.arg(),
+        "steer.test",
+    ])
+    .await;
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+
+    let json_text = std::fs::read_to_string(json_path.path()).expect("read json export");
+    let json: serde_json::Value = serde_json::from_str(&json_text).expect("valid exported JSON");
+    assert_eq!(json["results"].as_array().unwrap().len(), 2);
+    assert_eq!(json["steerings"][0]["host"], "steer.test");
+
+    let csv_text = std::fs::read_to_string(csv_path.path()).expect("read csv export");
+    assert!(csv_text.starts_with("rank,server,name,"));
+    assert_eq!(csv_text.lines().count(), 3);
+
+    let html_text = std::fs::read_to_string(html_path.path()).expect("read html export");
+    assert!(html_text.contains("<!DOCTYPE html>"));
+    assert!(html_text.contains("<h2>Steering</h2>"));
+    assert!(html_text.contains("steer.test"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

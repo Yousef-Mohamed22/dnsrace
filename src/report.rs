@@ -423,13 +423,39 @@ fn jbool(v: Option<bool>) -> String {
     }
 }
 
+fn steering_json(s: &Steering) -> String {
+    let entries: Vec<String> = s
+        .entries
+        .iter()
+        .map(|e| {
+            let (median_ms, failed) = connect_summary(e);
+            format!(
+                "      {{\"ip\": {}, \"returned_by\": {}, \"connect_ms\": {}, \"failed\": {}}}",
+                jstr(&e.ip.to_string()),
+                e.returned_by,
+                jnum(median_ms),
+                failed
+            )
+        })
+        .collect();
+    format!(
+        "{{\n    \"host\": {},\n    \"servers\": {},\n    \"addresses\": [\n{}\n    ]\n  }}",
+        jstr(&s.host),
+        s.servers,
+        entries.join(",\n")
+    )
+}
+
 /// The whole result as one JSON document.
+///
+/// `steering` keeps the original single-host shape for compatibility. `steerings` contains
+/// every requested hostname, in the order they were given.
 pub fn json(
     version: &str,
     data_center: Option<&str>,
     rows: &[Row],
     current: &HashSet<IpAddr>,
-    steering: Option<&Steering>,
+    steerings: &[Steering],
 ) -> String {
     let results: Vec<String> = rows
         .iter()
@@ -456,40 +482,25 @@ pub fn json(
             )
         })
         .collect();
-    let steer = match steering {
-        None => "null".to_string(),
-        Some(s) => {
-            let entries: Vec<String> = s
-                .entries
-                .iter()
-                .map(|e| {
-                    let (median_ms, failed) = connect_summary(e);
-                    format!(
-                        "      {{\"ip\": {}, \"returned_by\": {}, \"connect_ms\": {}, \"failed\": {}}}",
-                        jstr(&e.ip.to_string()),
-                        e.returned_by,
-                        jnum(median_ms),
-                        failed
-                    )
-                })
-                .collect();
-            format!(
-                "{{\n    \"host\": {},\n    \"servers\": {},\n    \"addresses\": [\n{}\n    ]\n  }}",
-                jstr(&s.host),
-                s.servers,
-                entries.join(",\n")
-            )
-        }
+    let all_steerings: Vec<String> = steerings.iter().map(steering_json).collect();
+    let steer = steerings
+        .first()
+        .map_or_else(|| "null".to_string(), steering_json);
+    let steer_all = if all_steerings.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[\n    {}\n  ]", all_steerings.join(",\n    "))
     };
     format!(
-        "{{\n  \"dnsrace\": {},\n  \"data_center\": {},\n  \"results\": [\n{}\n  ],\n  \"recommended\": {},\n  \"fastest\": {},\n  \"fastest_known\": {},\n  \"steering\": {}\n}}",
+        "{{\n  \"dnsrace\": {},\n  \"data_center\": {},\n  \"results\": [\n{}\n  ],\n  \"recommended\": {},\n  \"fastest\": {},\n  \"fastest_known\": {},\n  \"steering\": {},\n  \"steerings\": {}\n}}",
         jstr(version),
         jopt(data_center.map(str::to_string)),
         results.join(",\n"),
         jopt(recommended(rows).map(|r| fmt_addr(r.addr))),
         jopt(fastest(rows).map(|r| fmt_addr(r.addr))),
         jopt(fastest_known(rows).map(|r| fmt_addr(r.addr))),
-        steer
+        steer,
+        steer_all
     )
 }
 
@@ -497,13 +508,68 @@ pub fn json(
 // HTML report
 // ---------------------------------------------------------------------------------------
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn steering_html(steerings: &[Steering]) -> String {
+    if steerings.is_empty() {
+        return String::new();
+    }
+    let mut sections = String::from("<h2>Steering</h2>\n");
+    for s in steerings {
+        sections.push_str(&format!(
+            "<section class=\"steering\">\n<h3>{}</h3>\n",
+            html_escape(&s.host)
+        ));
+        if s.servers == 0 {
+            sections.push_str(
+                "<p class=\"muted\">No healthy port-53 server was available for a steering check.</p>\n</section>\n",
+            );
+            continue;
+        }
+        sections.push_str(&format!(
+            "<p class=\"muted\">Addresses handed out by the {} fastest servers, and TCP connect time to each.</p>\n",
+            s.servers
+        ));
+        if s.entries.is_empty() {
+            sections
+                .push_str("<p>No server returned an address for this hostname.</p>\n</section>\n");
+            continue;
+        }
+        sections.push_str(
+            "<table>\n<thead>\n<tr><th>Address</th><th>Returned by</th><th>Median connect</th><th>Failed attempts</th></tr>\n</thead>\n<tbody>\n",
+        );
+        for e in &s.entries {
+            let (median_ms, failed) = connect_summary(e);
+            sections.push_str(&format!(
+                "<tr><td>{}</td><td>{} of {}</td><td>{}</td><td>{} of {}</td></tr>\n",
+                e.ip,
+                e.returned_by,
+                s.servers,
+                median_ms
+                    .map(|ms| format!("{ms:.0} ms"))
+                    .unwrap_or_else(|| "FAILED".to_string()),
+                failed,
+                e.connects.len()
+            ));
+        }
+        sections.push_str("</tbody>\n</table>\n</section>\n");
+    }
+    sections
+}
+
 /// The whole result as a self-contained HTML report.
 pub fn html(
     version: &str,
     data_center: Option<&str>,
     rows: &[Row],
     current: &HashSet<IpAddr>,
-    _steering: Option<&Steering>,
+    steerings: &[Steering],
 ) -> String {
     let rec = recommended(rows);
     let fastest = fastest(rows);
@@ -530,12 +596,12 @@ pub fn html(
             };
             let doh_mark = if r.is_doh { " (DoH)" } else { "" };
             format!(
-                "<tr>\n<td>{}</td>\n<td>{}{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td class=\"{}\">{}</td>\n</tr>",
+                "<tr>\n<td>{}</td>\n<td>{}{}{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td class=\"{}\">{}</td>\n</tr>",
                 i + 1,
                 fmt_addr(r.addr),
                 doh_mark,
                 current_mark,
-                r.name,
+                html_escape(&r.name),
                 fmt_ms(r.cached),
                 fmt_ms(r.cached_mean),
                 fmt_ms(r.cached_min),
@@ -556,8 +622,9 @@ pub fn html(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let rec_label = rec.map(|r| format!("{} ({})", fmt_addr(r.addr), r.name));
-    let fastest_label = fastest.map(|r| format!("{} ({})", fmt_addr(r.addr), r.name));
+    let rec_label = rec.map(|r| format!("{} ({})", fmt_addr(r.addr), html_escape(&r.name)));
+    let fastest_label = fastest.map(|r| format!("{} ({})", fmt_addr(r.addr), html_escape(&r.name)));
+    let steering_sections = steering_html(steerings);
 
     format!(
         r#"<!DOCTYPE html>
@@ -581,6 +648,8 @@ pub fn html(
   .verdict-stay {{ color: #b8860b; font-weight: bold; }}
   .muted {{ color: #666; }}
   .doh {{ font-size: 0.85em; color: #666; }}
+  .steering {{ margin: 1.5rem 0 2rem; }}
+  .steering h3 {{ margin-bottom: 0.25rem; }}
 </style>
 </head>
 <body>
@@ -596,6 +665,7 @@ pub fn html(
 {rows_html}
 </tbody>
 </table>
+{steering_sections}
 <h2>Summary</h2>
 <div class="summary">
 <p><strong>Recommended:</strong> {rec}</p>
@@ -609,7 +679,8 @@ pub fn html(
         now = now,
         potential_dc = data_center
             .map(|dc| format!(
-                "<p class=\"muted\"><strong>Cloudflare data center:</strong> {dc}</p>\n"
+                "<p class=\"muted\"><strong>Cloudflare data center:</strong> {}</p>\n",
+                html_escape(dc)
             ))
             .unwrap_or_default(),
         rec = rec_label.as_deref().unwrap_or("none"),
@@ -617,6 +688,7 @@ pub fn html(
             .as_ref()
             .map(|l| format!("<p><strong>Fastest overall:</strong> {l}</p>"))
             .unwrap_or_default(),
+        steering_sections = steering_sections,
         verdict = verdict_html(rec, fastest, rows, current),
     )
 }
@@ -635,7 +707,7 @@ fn verdict_html(
         lines.push(format!(
             "<p><strong>Fastest overall:</strong> {} ({})</p>",
             fmt_addr(f.addr),
-            f.name
+            html_escape(&f.name)
         ));
     }
     let mine: Vec<&Row> = rows.iter().filter(|r| is_current(r, current)).collect();
@@ -675,7 +747,7 @@ fn verdict_html(
         lines.push(format!(
             "<p class=\"verdict-ok\"><strong>Verdict:</strong> Use {} ({}); your current DNS was not detected.</p>",
             fmt_addr(r.addr),
-            r.name
+            html_escape(&r.name)
         ));
     }
     lines.join("")
@@ -973,7 +1045,7 @@ mod tests {
             Some("mrs04"),
             &sample(),
             &current,
-            Some(&steering_sample()),
+            &[steering_sample()],
         );
         assert!(text.starts_with("{\n  \"dnsrace\": \"0.5.0\""));
         assert!(text.contains("\"data_center\": \"mrs04\""));
@@ -984,10 +1056,25 @@ mod tests {
         assert!(text.contains("\"recommended\": \"1.1.1.1\""));
         assert!(text.contains("\"fastest_known\": \"1.1.1.1\""));
         assert!(text.contains("\"connect_ms\": null, \"failed\": 3"));
-        let bare = json("0.5.0", None, &[], &HashSet::new(), None);
+        assert!(text.contains("\"steering\": {\n    \"host\": \"github.com\""));
+        assert!(text.contains("\"steerings\": [\n    {\n    \"host\": \"github.com\""));
+        let bare = json("0.5.0", None, &[], &HashSet::new(), &[]);
         assert!(bare.contains("\"data_center\": null"));
         assert!(bare.contains("\"steering\": null"));
+        assert!(bare.contains("\"steerings\": []"));
         assert!(bare.contains("\"recommended\": null"));
         assert!(bare.contains("\"fastest\": null"));
+    }
+
+    #[test]
+    fn html_includes_steering_and_escapes_hostnames() {
+        let current: HashSet<IpAddr> = ["1.1.1.1".parse().unwrap()].into_iter().collect();
+        let mut steering = steering_sample();
+        steering.host = "example.test<script>".into();
+        let text = html("0.5.0", None, &sample(), &current, &[steering]);
+        assert!(text.contains("<h2>Steering</h2>"));
+        assert!(text.contains("example.test&lt;script&gt;"));
+        assert!(!text.contains("example.test<script>"));
+        assert!(text.contains("185.199.108.133"));
     }
 }

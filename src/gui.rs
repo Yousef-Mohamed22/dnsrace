@@ -7,6 +7,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use eframe::egui;
+
 use crate::cli::{self, Config};
 use crate::report;
 
@@ -104,28 +106,39 @@ impl DnsRaceGui {
 
     /// Check for messages from the benchmark thread (non-blocking).
     fn poll_messages(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+
         let rx = match self.rx.take() {
             Some(rx) => rx,
             None => return,
         };
         let mut finished = false;
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                GuiMsg::Progress(done, total, elapsed) => {
+        loop {
+            match rx.try_recv() {
+                Ok(GuiMsg::Progress(done, total, elapsed)) => {
                     self.progress = Some((done, total, elapsed));
                 }
-                GuiMsg::Finished(text, code) => {
+                Ok(GuiMsg::Finished(text, code)) => {
                     self.running = false;
                     self.result = Some(text);
                     self.exit_code = code;
                     self.progress = None;
                     finished = true;
                 }
-                GuiMsg::Error(err) => {
+                Ok(GuiMsg::Error(err)) => {
                     self.running = false;
                     self.error = Some(err);
                     self.progress = None;
                     finished = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !finished {
+                        self.running = false;
+                        self.error = Some("The benchmark thread stopped unexpectedly.".to_string());
+                        self.progress = None;
+                    }
+                    return;
                 }
             }
         }
@@ -195,24 +208,28 @@ impl DnsRaceGui {
                 }
             };
 
-            let exit_code =
+            let (text, exit_code) =
                 runtime.block_on(run_gui_benchmark(cfg, move |done, total, elapsed| {
                     let _ = tx_progress.send(GuiMsg::Progress(done, total, elapsed));
                 }));
 
-            let _ = tx.send(GuiMsg::Finished(
-                format!("exit code: {exit_code}"),
-                exit_code,
-            ));
+            let _ = tx.send(GuiMsg::Finished(text, exit_code));
         });
     }
 }
 
 impl eframe::App for DnsRaceGui {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_messages();
+        if self.running {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("dnsrace");
             ui.label("Race DNS servers from your connection and find the fastest one.");
             ui.separator();
@@ -283,20 +300,15 @@ impl eframe::App for DnsRaceGui {
             }
 
             if self.running {
-                ui.add_enabled_ui(true, |ui| {
-                    if let Some((done, total, elapsed)) = self.progress {
-                        let pct = done.saturating_mul(100) / total.max(1);
-                        let fraction = pct as f32 / 100.0_f32;
-                        ui.add(egui::ProgressBar::new(fraction).text(format!(
-                            "Testing {done}/{total} servers ({pct}%) - {elapsed:.1}s"
-                        )));
-                    } else {
-                        ui.spinner();
-                        ui.label("Starting benchmark...");
-                    }
-                });
-                if ui.button("Cancel").clicked() {
-                    self.running = false;
+                if let Some((done, total, elapsed)) = self.progress {
+                    let pct = done.saturating_mul(100) / total.max(1);
+                    let fraction = pct as f32 / 100.0_f32;
+                    ui.add(egui::ProgressBar::new(fraction).text(format!(
+                        "Testing {done}/{total} servers ({pct}%) - {elapsed:.1}s"
+                    )));
+                } else {
+                    ui.spinner();
+                    ui.label("Starting benchmark...");
                 }
             }
 
@@ -306,7 +318,7 @@ impl eframe::App for DnsRaceGui {
                 egui::Window::new("Error")
                     .collapsible(false)
                     .resizable(false)
-                    .show(ctx, |ui| {
+                    .show(&ctx, |ui| {
                         ui.colored_label(egui::Color32::RED, &err);
                         if ui.button("Dismiss").clicked() {
                             self.error = None;
@@ -316,7 +328,17 @@ impl eframe::App for DnsRaceGui {
 
             if let Some(text) = &self.result {
                 ui.separator();
-                ui.label("Results:");
+                if self.exit_code == 0 {
+                    ui.label("Results:");
+                } else {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!(
+                            "Benchmark did not finish successfully (exit code {}).",
+                            self.exit_code
+                        ),
+                    );
+                }
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.monospace(text);
                 });
@@ -326,20 +348,15 @@ impl eframe::App for DnsRaceGui {
                 }
             }
         });
-
-        if self.running {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
     }
 }
 
 /// Runs the benchmark logic for the GUI, reporting progress via a callback.
-async fn run_gui_benchmark<F>(cfg: Config, mut on_progress: F) -> u8
+async fn run_gui_benchmark<F>(cfg: Config, mut on_progress: F) -> (String, u8)
 where
     F: FnMut(usize, usize, f64) + Send + 'static,
 {
     use std::collections::HashSet;
-    use std::io::Write;
     use std::time::Instant;
 
     use tokio::task::JoinSet;
@@ -350,13 +367,22 @@ where
     use crate::system;
     use crate::util;
 
+    fn failed(message: impl Into<String>) -> (String, u8) {
+        (message.into(), 1)
+    }
+
     let started = Instant::now();
     util::seed_rng();
 
     let list_text = match &cfg.servers_file {
         Some(path) => match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => return 1,
+            Ok(text) => text,
+            Err(e) => {
+                return failed(format!(
+                    "Could not read the server list {}: {e}",
+                    path.display()
+                ));
+            }
         },
         None => servers::BUILTIN.to_string(),
     };
@@ -371,7 +397,9 @@ where
         .await
         .unwrap_or_default();
     let nearby_cc = if cfg.nearby {
-        servers::fetch_country_code()
+        tokio::task::spawn_blocking(servers::fetch_country_code)
+            .await
+            .unwrap_or(None)
     } else {
         None
     };
@@ -403,14 +431,15 @@ where
         lists.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
+    let family_allows = |addr: SocketAddr| match cfg.family {
+        cli::Family::Any => true,
+        cli::Family::V4 => addr.is_ipv4(),
+        cli::Family::V6 => addr.is_ipv6(),
+    };
+
     let mut pool = Pool::default();
     for c in &listed {
-        let allows = match cfg.family {
-            cli::Family::Any => true,
-            cli::Family::V4 => c.addr.is_ipv4(),
-            cli::Family::V6 => c.addr.is_ipv6(),
-        };
-        if allows {
+        if family_allows(c.addr) {
             pool.add(c.addr, &c.name);
         }
     }
@@ -418,32 +447,29 @@ where
         .dns
         .iter()
         .copied()
-        .filter(|ip| match cfg.family {
-            cli::Family::Any => true,
-            cli::Family::V4 => ip.is_ipv4(),
-            cli::Family::V6 => ip.is_ipv6(),
-        })
+        .filter(|ip| family_allows(SocketAddr::new(*ip, 53)))
         .collect();
-    if let Some(gateway) = sys.gateway {
+    if let Some(gateway) = sys.gateway
+        && family_allows(SocketAddr::new(gateway, 53))
+    {
         pool.add(SocketAddr::new(gateway, 53), ROUTER);
     }
     for &ip in &current_ips {
         pool.add(SocketAddr::new(ip, 53), CURRENT);
     }
     for &addr in &cfg.add {
-        pool.add(addr, CUSTOM);
+        if family_allows(addr) {
+            pool.add(addr, CUSTOM);
+        }
     }
 
     for (_cc, result) in lists {
         if let Ok(ips) = result {
             for ip in ips {
                 let addr = SocketAddr::new(ip, 53);
-                let allows = match cfg.family {
-                    cli::Family::Any => true,
-                    cli::Family::V4 => addr.is_ipv4(),
-                    cli::Family::V6 => addr.is_ipv6(),
-                };
-                if allows && pool.add(addr, OTHER) {}
+                if family_allows(addr) {
+                    pool.add(addr, OTHER);
+                }
             }
         }
     }
@@ -459,19 +485,25 @@ where
     }
 
     if pool.is_empty() {
-        return 1;
+        return failed(
+            "No servers to test. The server list is empty or every server was filtered out by the address-family setting.",
+        );
     }
 
     let scan_wait = cfg.timeout.min(Duration::from_secs(3));
     let scan = bench::quick_scan(pool.items(), scan_wait, cfg.tcp).await;
     if scan.is_empty() {
-        return 1;
+        return failed(
+            "No server answered the quick scan. Check your connection and whether UDP/TCP port 53 is blocked by a firewall or VPN.",
+        );
     }
     on_progress(scan.len(), scan.len(), started.elapsed().as_secs_f64());
 
     let short = bench::shortlist(&scan, cfg.known, cfg.other, &current_ips);
     if short.servers.is_empty() {
-        return 1;
+        return failed(
+            "No servers were selected for the full test. Check --known/--other or your server list.",
+        );
     }
 
     let stage2_started = Instant::now();
@@ -487,61 +519,75 @@ where
     )
     .await;
 
-    let current: HashSet<std::net::IpAddr> = current_ips.iter().copied().collect();
+    let steerings =
+        if cfg.host.is_empty() || !matches!(cfg.format, OutputFormat::Table | OutputFormat::Json) {
+            Vec::new()
+        } else {
+            let want_v6 = matches!(cfg.family, cli::Family::Any | cli::Family::V6);
+            bench::steerings(&cfg.host, &rows, cfg.connect_port, want_v6).await
+        };
 
+    let current: HashSet<std::net::IpAddr> = current_ips.iter().copied().collect();
     let json_output = report::json(
         env!("CARGO_PKG_VERSION"),
         data_center.as_deref(),
         &rows,
         &current,
-        None,
+        &steerings,
     );
     let csv_output = report::csv(&rows, &current);
 
     let mut out = String::new();
-
     match cfg.format {
-        OutputFormat::Json => {
-            out.push_str(&json_output);
-        }
-        OutputFormat::Csv => {
-            out.push_str(&csv_output);
-        }
+        OutputFormat::Json => out.push_str(&json_output),
+        OutputFormat::Csv => out.push_str(&csv_output),
         OutputFormat::Quiet => match report::recommended(&rows) {
             Some(r) => out.push_str(&crate::servers::fmt_addr(r.addr)),
-            None => out.push_str("no healthy server to recommend"),
+            None => {
+                return failed(
+                    "No healthy server to recommend. Try again, raise the timeout, or use --repeat.",
+                );
+            }
         },
         OutputFormat::Table => {
-            let _shown = rows.len();
             out.push_str(&report::table(&rows, &current, false));
             out.push('\n');
             out.push_str(&report::summary(&rows, &current, false, cfg.repeat));
-            out.push('\n');
             if cfg.verbose {
+                out.push('\n');
                 out.push_str(&report::details(&rows));
             }
+            for steering in &steerings {
+                out.push('\n');
+                out.push_str(&report::steering_text(steering));
+            }
+            out.push_str(&format!(
+                "\n\nDone in {:.1}s.",
+                started.elapsed().as_secs_f64()
+            ));
         }
     }
 
-    out.push_str(&format!(
-        "\nDone in {:.1}s.",
-        started.elapsed().as_secs_f64()
-    ));
-
-    let _ = std::io::stdout().write_all(out.as_bytes());
-    let _ = std::io::stdout().flush();
-
-    0
+    (out, 0)
 }
 
 /// Entry point for the GUI binary.
 pub async fn run_gui(_cfg: Config) -> u8 {
-    let options = eframe::NativeOptions::default();
-    eframe::run_native(
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1000.0, 760.0])
+            .with_min_inner_size([700.0, 480.0]),
+        ..Default::default()
+    };
+    match eframe::run_native(
         "dnsrace",
         options,
         Box::new(|_cc| Ok(Box::new(DnsRaceGui::new()))),
-    )
-    .map(|_| 0)
-    .unwrap_or(1)
+    ) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("dnsrace: could not start the graphical interface: {e}");
+            1
+        }
+    }
 }

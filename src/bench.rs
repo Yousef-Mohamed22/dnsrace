@@ -615,6 +615,46 @@ pub async fn steering(
     }
 }
 
+/// The port-53 servers used for steering checks: healthy, fastest first, DoH rows excluded.
+fn steering_targets(rows: &[Row]) -> Vec<SocketAddr> {
+    rows.iter()
+        .filter(|r| r.healthy() && !r.is_doh)
+        .take(10)
+        .map(|r| r.addr)
+        .collect()
+}
+
+/// Runs a steering check for every hostname, in the order the user supplied them.
+///
+/// DNS-over-HTTPS rows are skipped: their placeholder address is not a real DNS server that can
+/// be asked about a hostname. The hosts are checked against the ten fastest healthy port-53
+/// servers.
+pub async fn steerings(
+    hosts: &[String],
+    rows: &[Row],
+    connect_port: u16,
+    want_v6: bool,
+) -> Vec<Steering> {
+    if hosts.is_empty() {
+        return Vec::new();
+    }
+    let top = steering_targets(rows);
+    let mut set = JoinSet::new();
+    for (index, host) in hosts.iter().enumerate() {
+        let host = host.clone();
+        let top = top.clone();
+        set.spawn(async move { (index, steering(&host, &top, connect_port, want_v6).await) });
+    }
+    let mut results: Vec<(usize, Steering)> = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(item) = res {
+            results.push(item);
+        }
+    }
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +734,42 @@ mod tests {
         row.timeouts = 0;
         row.note = Note::Hijacks;
         assert!(!row.healthy());
+    }
+
+    fn result_row(addr: &str, is_doh: bool, note: Note, timeouts: u32) -> Row {
+        Row {
+            addr: addr.parse().unwrap(),
+            name: "x".into(),
+            is_doh,
+            cached: Some(1.0),
+            uncached: Some(1.0),
+            cached_min: Some(1.0),
+            cached_max: Some(1.0),
+            cached_p95: Some(1.0),
+            cached_p99: Some(1.0),
+            cached_mean: Some(1.0),
+            cached_jitter: Some(0.0),
+            dnssec: None,
+            timeouts,
+            note,
+            score: 1.0,
+        }
+    }
+
+    #[test]
+    fn steering_targets_skip_doh_flagged_rows_and_cap_at_ten() {
+        let rows = vec![
+            result_row("0.0.0.0:53", true, Note::Ok, 0),
+            result_row("1.1.1.1:53", false, Note::Hijacks, 0),
+            result_row("8.8.8.8:53", false, Note::Ok, 4),
+            result_row("9.9.9.9:53", false, Note::Ok, 0),
+        ];
+        let targets = steering_targets(&rows);
+        assert_eq!(targets, vec!["9.9.9.9:53".parse().unwrap()]);
+
+        let many: Vec<Row> = (1..=12)
+            .map(|i| result_row(&format!("192.0.2.{i}:53"), false, Note::Ok, 0))
+            .collect();
+        assert_eq!(steering_targets(&many).len(), 10);
     }
 }

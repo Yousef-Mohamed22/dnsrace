@@ -33,7 +33,26 @@ All notable changes to dnsrace are listed here. The format follows
 
 ### Fixed
 
-- GUI builds cleanly with `--features gui` on Linux (glow), Windows (wgpu), and macOS (wgpu).
+- **Multiple hostnames now produce multiple steering reports.** Every requested site is
+  displayed in order instead of silently showing only the first one. JSON includes all of them
+  in a new `steerings` array (while keeping `steering` for compatibility), and HTML exports
+  include a steering section for each hostname.
+- **DNS-over-HTTPS rows are excluded from steering checks.** Their placeholder address is not a
+  real port-53 server, so they can no longer receive hostname queries.
+- **The GUI shows the full benchmark report**, including steering results, instead of only
+  `exit code: 0`. Hostname entries are honored, failures display a useful message, and JSON/CSV
+  output is no longer polluted by a trailing "Done" line.
+- **HTML reports keep the results table aligned** and HTML-escape server names, data-center
+  names and hostnames.
+- **GUI builds cleanly with `--features gui`** on Linux (glow), Windows (wgpu), and macOS (wgpu).
+  The GUI uses eframe's re-exported egui so its versions cannot drift apart, and Windows resolves
+  a single `windows` crate version so `wgpu-hal` can compile.
+- **The GUI no longer hangs forever** if its benchmark thread dies: it reports that the worker
+  stopped instead of leaving a spinner running.
+- **Release workflow fixed:** Linux ARM64 builds natively on an ARM runner, CLI and GUI binaries
+  are built separately for every platform, Windows packaging produces the expected `.exe` files,
+  macOS uses standard checksums, and the release job publishes one consolidated
+  `SHA256SUMS.txt`.
 
 ## [0.4.0] - 2026-10-20
 
@@ -103,10 +122,10 @@ All notable changes to dnsrace are listed here. The format follows
 
 ### Verified
 
-- 62 unit tests and 11 end-to-end tests pass on Rust 1.99.0 and 1.99.1.
-- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean.
-- End-to-end tests cover quiet, CSV, verbose/DNSSEC, repeat, IPv4/IPv6 filtering, ranking,
-  hijacking, unreliable servers, steering and JSON.
+- 66 unit tests and 12 end-to-end tests pass with the `gui` feature on Rust 1.99.
+- `cargo fmt --check` and `cargo clippy --all-targets --features gui -- -D warnings` are clean.
+- End-to-end tests cover quiet, CSV, JSON, verbose/DNSSEC, repeat, IPv4/IPv6 filtering, ranking,
+  hijacking, unreliable servers, multiple steering hostnames, file exports and HTML reports.
 
 ## [0.3.0] - 2026-10-17
 

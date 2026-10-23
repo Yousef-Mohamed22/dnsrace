@@ -18,7 +18,7 @@ IPv4/IPv6 filters. See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ## Install
 
-**Download a build** from the [Releases page](https://github.com/Yousef-Mohamed22/dnsrace/releases): Linux (x86_64 and arm64, static, runs on any distribution), macOS (Apple Silicon and Intel) and Windows (x86_64). Unpack it and run `dnsrace` (`dnsrace.exe` on Windows) from a terminal. Each release has a `SHA256SUMS.txt` to check your download.
+**Download a build** from the [Releases page](https://github.com/Yousef-Mohamed22/dnsrace/releases): Linux (x86_64 and ARM64), macOS (Apple Silicon and Intel) and Windows (x86_64). Each platform has a terminal build and a `-gui` build; the GUI build also accepts every CLI flag. On Linux and macOS, make the downloaded file executable with `chmod +x dnsrace-*`, then run it. Each release has a `SHA256SUMS.txt` to check your download.
 
 - macOS: the binaries are not signed, so the first run may be blocked. Remove the quarantine flag once with `xattr -d com.apple.quarantine ./dnsrace`.
 - Windows: SmartScreen may warn about an unsigned program; choose "More info" then "Run anyway", or run it from PowerShell: `.\dnsrace.exe`.
@@ -207,7 +207,7 @@ dnsrace --csv > result.csv
 
 ```json
 {
-  "dnsrace": "0.4.0",
+  "dnsrace": "0.5.0",
   "data_center": "mrs04",
   "results": [
     {"rank": 1, "server": "1.1.1.1", "name": "Cloudflare", "cached_ms": 45.0, "uncached_ms": 66.0, "min_ms": 40.2, "p95_ms": 51.8, "jitter_ms": 2.4, "timeouts": 0, "flag": null, "dnssec": true, "current": false}
@@ -215,11 +215,12 @@ dnsrace --csv > result.csv
   "recommended": "1.1.1.1",
   "fastest": "1.1.1.1",
   "fastest_known": "1.1.1.1",
-  "steering": null
+  "steering": null,
+  "steerings": []
 }
 ```
 
-`flag` is `null`, `"HIJACKS-NXDOMAIN"` or `"UNRELIABLE"`. `dnssec` is `true`, `false` or `null` when the check could not be completed. `recommended` is the address from the summary; `fastest` and `fastest_known` are kept for compatibility. With a hostname, `steering` holds `host`, `servers` and a list of `addresses` (`ip`, `returned_by`, `connect_ms`, `failed`).
+`flag` is `null`, `"HIJACKS-NXDOMAIN"` or `"UNRELIABLE"`. `dnssec` is `true`, `false` or `null` when the check could not be completed. `recommended` is the address from the summary; `fastest` and `fastest_known` are kept for compatibility. With hostnames, `steering` holds the first result and `steerings` holds every result in the order given; each has `host`, `servers` and a list of `addresses` (`ip`, `returned_by`, `connect_ms`, `failed`).
 
 CSV columns:
 
@@ -281,13 +282,13 @@ dnsrace builds the DNS packets itself, sends them over UDP and times the replies
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --all-targets --features gui -- -D warnings
+cargo test --features gui
 ```
 
-The tests need no network: unit tests cover the DNS packets, parsing, statistics and reports, and end-to-end tests run the real binary against simulated DNS servers on loopback (fast, slow, hijacking, silent, dead, IPv6, DNSSEC). CI runs the tests on Linux, macOS and Windows, and checks formatting and lints with Rust 1.99, the minimum supported version. Dependabot sends weekly update pull requests.
+The tests need no network: unit tests cover the DNS packets, parsing, statistics and reports, and end-to-end tests run the real binary against simulated DNS servers on loopback (fast, slow, hijacking, silent, dead, IPv6, DNSSEC, exports). CI runs the tests on Linux, build-checks macOS and Windows, and checks formatting and lints with Rust 1.99, the minimum supported version. Dependabot sends weekly update pull requests.
 
-To publish a release, set the version in `Cargo.toml`, update `CHANGELOG.md`, commit, then push a matching tag such as `v0.4.0`. The release workflow builds the binaries and attaches them, with checksums, to a GitHub release.
+To publish a release, set the version in `Cargo.toml`, update `CHANGELOG.md`, commit, then push a matching tag such as `v0.5.0`. The release workflow builds native CLI and GUI binaries for Linux x86_64, Linux ARM64, Windows x86_64, macOS Intel and macOS Apple Silicon, then attaches them with one consolidated `SHA256SUMS.txt` to a GitHub release.
 
 ## License
 
