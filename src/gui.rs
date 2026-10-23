@@ -7,7 +7,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crate::app::run as run_cli;
 use crate::cli::{self, Config};
 use crate::report;
 
@@ -137,39 +136,40 @@ impl DnsRaceGui {
 
     /// Build a Config from the current UI state.
     fn build_config(&self) -> Config {
-        let mut cfg = Config::default();
-        cfg.doh = self.doh;
-        cfg.tcp = self.tcp;
-        cfg.timeout = Duration::from_millis(
-            self.timeout_ms
-                .trim()
-                .parse::<u64>()
-                .unwrap_or(1000)
-                .clamp(100, 60_000),
-        );
-        cfg.jobs = self.jobs.trim().parse::<usize>().unwrap_or(16).clamp(1, 64);
-        cfg.repeat = self.repeat.trim().parse::<usize>().unwrap_or(1).clamp(1, 5);
-        cfg.family = match self.family {
-            Family::Any => cli::Family::Any,
-            Family::V4 => cli::Family::V4,
-            Family::V6 => cli::Family::V6,
-        };
-        cfg.format = match self.format {
-            OutputFormat::Table => cli::OutputFormat::Table,
-            OutputFormat::Json => cli::OutputFormat::Json,
-            OutputFormat::Csv => cli::OutputFormat::Csv,
-            OutputFormat::Quiet => cli::OutputFormat::Quiet,
-        };
-        cfg.verbose = self.verbose;
-        cfg.detect = self.detect;
-        cfg.nearby = self.nearby;
-        cfg.host = self
-            .hosts
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
-        cfg
+        Config {
+            doh: self.doh,
+            tcp: self.tcp,
+            timeout: Duration::from_millis(
+                self.timeout_ms
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap_or(1000)
+                    .clamp(100, 60_000),
+            ),
+            jobs: self.jobs.trim().parse::<usize>().unwrap_or(16).clamp(1, 64),
+            repeat: self.repeat.trim().parse::<usize>().unwrap_or(1).clamp(1, 5),
+            family: match self.family {
+                Family::Any => cli::Family::Any,
+                Family::V4 => cli::Family::V4,
+                Family::V6 => cli::Family::V6,
+            },
+            format: match self.format {
+                OutputFormat::Table => cli::OutputFormat::Table,
+                OutputFormat::Json => cli::OutputFormat::Json,
+                OutputFormat::Csv => cli::OutputFormat::Csv,
+                OutputFormat::Quiet => cli::OutputFormat::Quiet,
+            },
+            verbose: self.verbose,
+            detect: self.detect,
+            nearby: self.nearby,
+            host: self
+                .hosts
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            ..Default::default()
+        }
     }
 
     /// Start the benchmark in a background thread.
@@ -344,7 +344,7 @@ where
 
     use tokio::task::JoinSet;
 
-    use crate::bench::{self, Note};
+    use crate::bench;
     use crate::cli::OutputFormat;
     use crate::servers::{self, CURRENT, CUSTOM, OTHER, Pool, ROUTER};
     use crate::system;
@@ -377,10 +377,10 @@ where
     };
 
     let mut countries = cfg.countries.clone();
-    if let Some(cc) = &nearby_cc {
-        if !countries.contains(cc) {
-            countries.push(cc.clone());
-        }
+    if let Some(cc) = &nearby_cc
+        && !countries.contains(cc)
+    {
+        countries.push(cc.clone());
     }
     countries.sort();
     countries.dedup();
@@ -435,19 +435,16 @@ where
     }
 
     for (_cc, result) in lists {
-        match result {
-            Ok(ips) => {
-                for ip in ips {
-                    let addr = SocketAddr::new(ip, 53);
-                    let allows = match cfg.family {
-                        cli::Family::Any => true,
-                        cli::Family::V4 => addr.is_ipv4(),
-                        cli::Family::V6 => addr.is_ipv6(),
-                    };
-                    if allows && pool.add(addr, OTHER) {}
-                }
+        if let Ok(ips) = result {
+            for ip in ips {
+                let addr = SocketAddr::new(ip, 53);
+                let allows = match cfg.family {
+                    cli::Family::Any => true,
+                    cli::Family::V4 => addr.is_ipv4(),
+                    cli::Family::V6 => addr.is_ipv6(),
+                };
+                if allows && pool.add(addr, OTHER) {}
             }
-            Err(_) => {}
         }
     }
 
