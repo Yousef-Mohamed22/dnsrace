@@ -40,15 +40,15 @@ optional = true
 features = ["wgpu"]
 
 [target.'cfg(target_os = "linux")'.dependencies.egui]
-version = "0.29"
+version = "0.37"
 optional = true
 
 [target.'cfg(target_os = "windows")'.dependencies.egui]
-version = "0.29"
+version = "0.37"
 optional = true
 
 [target.'cfg(target_os = "macos")'.dependencies.egui]
-version = "0.29"
+version = "0.37"
 optional = true
 
 [profile.release]
