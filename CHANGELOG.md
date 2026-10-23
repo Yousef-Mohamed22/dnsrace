@@ -1,0 +1,126 @@
+# Changelog
+
+All notable changes to dnsrace are listed here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
+[Semantic Versioning](https://semver.org/).
+
+## [0.5.0] - 2026-10-22
+
+### Added
+
+- **Graphical user interface**: `--gui` opens a native desktop window (egui/eframe) with
+  settings, live progress, results table, and copy-to-clipboard. Built with `cargo build
+  --features gui`.
+- **DNS-over-HTTPS (DoH)**: `--doh` adds Cloudflare DoH and Google DoH as testable servers,
+  queried over HTTPS instead of port 53.
+- **TCP DNS**: `--tcp` sends DNS queries over TCP instead of UDP, useful for networks that
+  block or intercept UDP port 53.
+- **Multiple hostnames**: pass several `HOSTNAME` arguments for steering checks against
+  multiple sites at once.
+- **Enhanced statistics**: `--verbose` now also shows mean, max, and p99 latency alongside
+  min, p95, and jitter.
+- **File export**: `--export-json <FILE>`, `--export-csv <FILE>`, and `--export-html <FILE>`
+  write results to disk in addition to stdout.
+- **HTML report**: `--export-html` produces a self-contained, styled HTML report with the
+  full results table, recommendation, and verdict.
+
+### Changed
+
+- **Version 0.5.0.** `rust-version` stays at 1.99, edition 2024.
+- **`HOSTNAME` is now repeatable:** you can pass multiple hostnames for steering checks.
+- **`Row` gains `is_doh`, `cached_mean`, `cached_max`, `cached_p99` fields** for DoH support
+  and richer statistics.
+
+### Fixed
+
+- GUI builds cleanly with `--features gui` on Linux (glow), Windows (wgpu), and macOS (wgpu).
+
+## [0.4.0] - 2026-10-20
+
+### Added
+
+- **`--nearby`**: detects your country through Cloudflare and also tests the open resolvers
+  public-dns.info lists there. One flag instead of looking up your country code first.
+- **`-q, --quiet`**: prints exactly one line, the recommended address, for shell scripts. It
+  exits 1 when no healthy server can be recommended.
+- **`--csv`**: one row per server, ready for a spreadsheet. `--json`, `--csv` and `--quiet` are
+  mutually exclusive; with `--csv`, the `HOSTNAME` steering check is skipped with a note.
+- **`-v, --verbose`**: a second table with the fastest cached lookup (`min`), the 95th percentile
+  (`p95`), jitter (standard deviation) and the DNSSEC result.
+- **`--repeat <N>`**: repeats the full test up to five times and pools the measurements. Useful
+  when the top servers are within a millisecond of each other.
+- **`--top <N>`**: limits the tables to the N fastest rows without changing the summary, JSON or
+  CSV.
+- **`-4, --ipv4` and `-6, --ipv6`**: restrict the whole run to one address family, for networks
+  with broken IPv6.
+- **DNSSEC check**: one extra query per server asks for DNSSEC records (DO bit) and reads the
+  Authenticated Data (AD) bit. The result appears in `-v`, JSON and CSV. It is reported as
+  "could not check" when the server does not answer.
+- **Latency spread in JSON**: `min_ms`, `p95_ms` and `jitter_ms` for every server.
+- **`recommended` in JSON**, plus the existing `fastest` and `fastest_known` fields.
+- **A real verdict**: the summary now says whether switching would save time, how much, and
+  whether the result is too close to call.
+- **Progress with percentage and elapsed time** during the full test.
+
+### Changed
+
+- **Rust 1.99 / edition 2024.** `rust-version` in `Cargo.toml`, the lint toolchain and the MSRV
+  CI job are all on 1.99. Release binaries are still built with stable Rust.
+- **Dependencies refreshed**: tokio 1.54 and ureq 2.12 (latest 2.x, with native certificates).
+- **The summary is easier to read.** "Fastest known provider" is now "Recommended"; the fastest
+  overall server is shown separately when it differs; your current DNS shows the gap in ms; a
+  close-call hint appears when the top two are within 1.5 ms.
+- **`--timeout` now affects the quick scan too**, capped at 3 seconds so a large server list
+  cannot make stage 1 take minutes.
+- **README rewritten** around the common cases: one command to start, one to get local
+  resolvers, one to script it.
+- **Release archives now include `CHANGELOG.md`.**
+
+### Fixed
+
+- **Cached results depended on who had run the benchmark before.** The first run against a
+  resolver paid for cache misses, so the same server could be 35 ms on one run and 10 ms on the
+  next. Each server now gets an untimed warm-up pass (ten lookups at once) before measurement, so
+  "cached" means the same thing on every run.
+- **NOERROR replies with no A/AAAA records were counted as successes.** A server that returned
+  only a CNAME (or an empty answer) could look healthy. A usable cached answer now needs both an
+  answer record and at least one address.
+- **The quick scan stopped retrying after a SERVFAIL or an empty answer.** It returned "failed"
+  immediately instead of trying the second attempt.
+- **`--connect-port 0` was accepted** and produced meaningless TCP checks. It is now rejected
+  with a clear message.
+- **`--timeout` was ignored by the quick scan**, so `--timeout 3000` did not help a slow link in
+  stage 1.
+- **A current DNS server of the other address family was reported as "did not answer"** when
+  using `--ipv4` or `--ipv6`, even though it had simply been filtered out. Current DNS is now
+  filtered consistently before the scan and the shortlist.
+- **Your router, current DNS and `--add` servers consumed `--known` slots.** With `--known 2`,
+  two of the three full-test slots could go to servers you had already selected, leaving fewer
+  public resolvers tested. These servers are now always fully tested in addition to the `--known`
+  and `--other` picks.
+- **A run with no servers selected** (for example `--known 0 --other 0`) now exits 1 with a
+  message instead of printing an empty result.
+
+### Verified
+
+- 62 unit tests and 11 end-to-end tests pass on Rust 1.99.0 and 1.99.1.
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean.
+- End-to-end tests cover quiet, CSV, verbose/DNSSEC, repeat, IPv4/IPv6 filtering, ranking,
+  hijacking, unreliable servers, steering and JSON.
+
+## [0.3.0] - 2026-10-17
+
+### Added
+
+- First Rust-only release: no shell or Python required.
+- Two-stage benchmark: a quick scan of every candidate, then a full test of the fastest.
+- Cached and uncached lookups, medians, timeouts, `HIJACKS-NXDOMAIN` and `UNRELIABLE` flags.
+- Built-in list of about 85 public resolvers, IPv4 and IPv6.
+- `--countries`, `--known`, `--other`, `--servers`, `--add`, `--jobs`, `--timeout`,
+  `--connect-port`, `--no-detect`, `--json` and `--no-color`.
+- Router and current-DNS detection on Linux, macOS and Windows.
+- Hostname steering check with TCP connect times.
+- Cross-platform CI and release workflows.
+
+[0.4.0]: https://github.com/Yousef-Mohamed22/dnsrace/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/Yousef-Mohamed22/dnsrace/releases/tag/v0.3.0
