@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.99
+
+jobs:
+  release-linux:
+    name: Linux x86_64 + ARM64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: |
+            aarch64-unknown-linux-gnu
+
+      - name: Install cross-linker for ARM64 Linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install GUI system deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.0-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev
+
+      - name: Build release (CLI, x86_64)
+        run: cargo build --release --locked
+
+      - name: Build release (GUI, x86_64)
+        run: cargo build --release --locked --features gui
+
+      - name: Build release (CLI, ARM64)
+        run: cargo build --release --locked --target aarch64-unknown-linux-gnu
+
+      - name: Build release (GUI, ARM64)
+        run: cargo build --release --locked --target aarch64-unknown-linux-gnu --features gui
+
+      - name: Strip binaries
+        run: |
+          strip target/release/dnsrace
+          strip target/release/dnsrace 2>/dev/null || true
+          strip target/aarch64-unknown-linux-gnu/release/dnsrace 2>/dev/null || true
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/dnsrace dist/dnsrace-0.5.0-x86_64-unknown-linux-gnu
+          cp target/release/dnsrace dist/dnsrace-0.5.0-x86_64-unknown-linux-gnu-gui 2>/dev/null || true
+          cp target/aarch64-unknown-linux-gnu/release/dnsrace dist/dnsrace-0.5.0-aarch64-unknown-linux-gnu 2>/dev/null || true
+          cp target/aarch64-unknown-linux-gnu/release/dnsrace dist/dnsrace-0.5.0-aarch64-unknown-linux-gnu-gui 2>/dev/null || true
+          cd dist && sha256sum * > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-linux
+          path: dist/
+
+  release-windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Build release (CLI)
+        run: cargo build --release --locked
+
+      - name: Build release (GUI)
+        run: cargo build --release --locked --features gui
+
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          mkdir dist
+          Copy-Item target/release/dnsrace.exe dist/dnsrace-0.5.0-x86_64-pc-windows-msvc.exe
+          Copy-Item target/release/dnsrace.exe dist/dnsrace-0.5.0-x86_64-pc-windows-msvc-gui.exe 2>$null
+          cd dist
+          Get-FileHash -Algorithm SHA256 * | Format-Table -AutoSize | Out-File SHA256SUMS.txt -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-windows
+          path: dist/
+
+  release-macos:
+    name: macOS x86_64 + ARM64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: |
+            aarch64-apple-darwin
+
+      - name: Install GUI system deps (macOS)
+        run: |
+          brew install openssl@3 pkg-config
+
+      - name: Build release (CLI, x86_64)
+        run: cargo build --release --locked
+
+      - name: Build release (GUI, x86_64)
+        run: cargo build --release --locked --features gui
+
+      - name: Build release (CLI, ARM64)
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Build release (GUI, ARM64)
+        run: cargo build --release --locked --target aarch64-apple-darwin --features gui
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/dnsrace dist/dnsrace-0.5.0-x86_64-apple-darwin
+          cp target/release/dnsrace dist/dnsrace-0.5.0-x86_64-apple-darwin-gui 2>/dev/null || true
+          cp target/aarch64-apple-darwin/release/dnsrace dist/dnsrace-0.5.0-aarch64-apple-darwin 2>/dev/null || true
+          cp target/aarch64-apple-darwin/release/dnsrace dist/dnsrace-0.5.0-aarch64-apple-darwin-gui 2>/dev/null || true
+          cd dist && sha256sum * > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-macos
+          path: dist/
+
+  release:
+    name: Create GitHub Release
+    needs: [release-linux, release-windows, release-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: dnsrace v0.5.0
+          tag_name: ${{ github.ref_name }}
+          body: |
+            # dnsrace v0.5.0
+
+            ## What's New
+            - **Graphical user interface**: `--gui` opens a native desktop window with settings, live progress, results table, and copy-to-clipboard.
+            - **DNS-over-HTTPS (DoH)**: `--doh` adds Cloudflare DoH and Google DoH as testable servers.
+            - **TCP DNS**: `--tcp` sends DNS queries over TCP instead of UDP.
+            - **Multiple hostnames**: pass several `HOSTNAME` arguments for steering checks.
+            - **Enhanced statistics**: `--verbose` now shows mean, max, and p99 latency.
+            - **File export**: `--export-json`, `--export-csv`, `--export-html` write results to disk.
+            - **HTML report**: `--export-html` produces a styled HTML report.
+
+            ## Installation
+            Download the binary for your platform and run it. No installation required.
+
+            See [CHANGELOG.md](https://github.com/Yousef-Mohamed22/dnsrace/blob/main/CHANGELOG.md) for the full changelog.
+          draft: false
+          prerelease: false
+          files: |
+            dist/**/*

@@ -1,0 +1,9 @@
+/target/
+
+**/*.rs.bak
+
+*.zip
+
+.DS_Store
+*.swp
+*~
