@@ -1,20 +1,27 @@
-//! The measurements: the quick scan, the full test, and the "where does this site go" check.
+//! The measurements: the quick scan, the full test, DNSSEC checks and the "where does this site
+//! go" steering check.
+//!
+//! The transport is chosen by [`Protocol`]. Plain candidates use UDP or TCP; DoT/DoH candidates
+//! carry their own endpoint. All measurements return structured rows so the desktop interface
+//! can filter, sort and export them without parsing text.
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::dns::{
-    CLASS_CH, CLASS_IN, DohProvider, TYPE_A, TYPE_AAAA, TYPE_TXT, doh_query, query, query_ext,
-    query_tcp,
+    CLASS_CH, CLASS_IN, Reply, TYPE_A, TYPE_AAAA, TYPE_TXT, doh_query, query_dot, query_ext,
+    query_tcp_ext,
 };
-use crate::servers::{Candidate, OTHER, is_known};
+use crate::servers::{Candidate, Protocol, Target, is_known};
 use crate::util::{median, ms, percentile, rand64, stddev};
 
 /// Popular sites used for the "cached" lookups: the big resolvers almost always have these.
@@ -43,146 +50,8 @@ const ROUNDS: usize = 3;
 /// How many random, uncacheable names are looked up.
 const RANDOM_LOOKUPS: usize = 5;
 
-/// Which Cloudflare data center answers you (tells you how far your ISP routes you).
-pub async fn cloudflare_data_center() -> Option<String> {
-    let cloudflare = SocketAddr::from(([1, 1, 1, 1], 53));
-    query(
-        cloudflare,
-        "id.server",
-        TYPE_TXT,
-        CLASS_CH,
-        Duration::from_secs(2),
-    )
-    .await?
-    .txt
-}
-
-// ---------------------------------------------------------------------------------------
-// stage 1: quick scan
-// ---------------------------------------------------------------------------------------
-
-/// One lookup of google.com, retried when the server is slow or flaky. Returns the round-trip
-/// time in ms if the server gave a usable answer.
-async fn probe(addr: SocketAddr, attempts: usize, wait: Duration, tcp: bool) -> Option<f64> {
-    for _ in 0..attempts {
-        let r = if tcp {
-            query_tcp(addr, "google.com", TYPE_A, CLASS_IN, wait).await
-        } else {
-            query(addr, "google.com", TYPE_A, CLASS_IN, wait).await
-        };
-        if let Some(r) = r
-            && r.rcode == 0
-            && r.answers > 0
-            && !r.addrs.is_empty()
-        {
-            return Some(ms(r.rtt));
-        }
-    }
-    None
-}
-
-/// One quick-scan probe for a DNS-over-HTTPS provider.
-async fn probe_doh(provider: DohProvider, wait: Duration) -> Option<f64> {
-    let r = doh_query(provider, "google.com", wait).await?;
-    if r.status == 0 && r.answers > 0 {
-        return Some(ms(r.rtt));
-    }
-    None
-}
-
-async fn scan_one(
-    sem: Arc<Semaphore>,
-    c: Candidate,
-    wait: Duration,
-    tcp: bool,
-) -> Option<(Candidate, f64)> {
-    let _permit = sem.acquire_owned().await.ok()?;
-    // open resolvers from the country lists are mostly dead, so they get a single attempt
-    let attempts = if c.name == OTHER { 1 } else { 2 };
-    let rtt = match c.doh_provider {
-        Some(provider) => probe_doh(provider, wait).await?,
-        None => probe(c.addr, attempts, wait, tcp).await?,
-    };
-    Some((c, rtt))
-}
-
-/// Sends one lookup to every candidate (many at a time) and returns the ones that answered,
-/// fastest first, with their round-trip time in ms.
-pub async fn quick_scan(pool: &[Candidate], wait: Duration, tcp: bool) -> Vec<(Candidate, f64)> {
-    let sem = Arc::new(Semaphore::new(SCAN_JOBS));
-    let mut set = JoinSet::new();
-    for c in pool {
-        set.spawn(scan_one(sem.clone(), c.clone(), wait, tcp));
-    }
-    let mut hits = Vec::new();
-    while let Some(res) = set.join_next().await {
-        if let Ok(Some(hit)) = res {
-            hits.push(hit);
-        }
-    }
-    hits.sort_by(|a, b| a.1.total_cmp(&b.1));
-    hits
-}
-
-/// The servers that get the full test.
-#[derive(Debug)]
-pub struct Shortlist {
-    pub servers: Vec<Candidate>,
-    /// Your current DNS servers that did not answer the quick scan.
-    pub silent_current: Vec<IpAddr>,
-}
-
-/// The fastest `known` servers from the list, the fastest `other` country resolvers, and always
-/// your current DNS servers.
-pub fn shortlist(
-    scan: &[(Candidate, f64)],
-    known: usize,
-    other: usize,
-    current: &[IpAddr],
-) -> Shortlist {
-    let mut servers: Vec<Candidate> = Vec::new();
-    let (mut n_known, mut n_other) = (0, 0);
-    for (c, _) in scan {
-        if c.name == OTHER {
-            if n_other < other {
-                n_other += 1;
-                servers.push(c.clone());
-            }
-        } else if is_known(&c.name) {
-            if n_known < known {
-                n_known += 1;
-                servers.push(c.clone());
-            }
-        } else {
-            // your router, your current DNS and --add servers are always fully tested
-            servers.push(c.clone());
-        }
-    }
-    let mut silent_current = Vec::new();
-    for &ip in current {
-        match scan
-            .iter()
-            .find(|(c, _)| c.addr.ip() == ip && c.addr.port() == 53)
-        {
-            Some((c, _)) => {
-                if !servers.iter().any(|s| s.addr == c.addr) {
-                    servers.push(c.clone());
-                }
-            }
-            None => silent_current.push(ip),
-        }
-    }
-    Shortlist {
-        servers,
-        silent_current,
-    }
-}
-
-// ---------------------------------------------------------------------------------------
-// stage 2: full test
-// ---------------------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// A short verdict for a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Note {
     Ok,
     /// Answers names that cannot exist with a fake address.
@@ -191,30 +60,75 @@ pub enum Note {
     Unreliable,
 }
 
-#[derive(Clone, Debug)]
+impl Note {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Note::Ok => "OK",
+            Note::Hijacks => "Hijacks NXDOMAIN",
+            Note::Unreliable => "Unreliable",
+        }
+    }
+}
+
+/// What the DNSSEC checks found. `Validated` means the resolver set the AD bit for a signed name
+/// and correctly rejected a deliberately broken signature at the same time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecurityStatus {
+    Validated,
+    Insecure,
+    Partial,
+    BogusAccepted,
+    Unknown,
+}
+
+impl SecurityStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            SecurityStatus::Validated => "DNSSEC validated",
+            SecurityStatus::Insecure => "No DNSSEC",
+            SecurityStatus::Partial => "DNSSEC partial",
+            SecurityStatus::BogusAccepted => "Accepts bogus DNSSEC",
+            SecurityStatus::Unknown => "DNSSEC unknown",
+        }
+    }
+
+    pub const fn short(self) -> &'static str {
+        match self {
+            SecurityStatus::Validated => "DNSSEC ✓",
+            SecurityStatus::Insecure => "No DNSSEC",
+            SecurityStatus::Partial => "DNSSEC ?",
+            SecurityStatus::BogusAccepted => "Bogus accepted",
+            SecurityStatus::Unknown => "DNSSEC ?",
+        }
+    }
+}
+
+/// One measured resolver.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Row {
-    pub addr: SocketAddr,
-    pub name: String,
-    /// When set, this result came from a DNS-over-HTTPS provider rather than a port-53 server.
-    pub is_doh: bool,
+    /// Stable candidate id, used by the UI.
+    pub id: String,
+    pub provider: String,
+    pub label: String,
+    pub transport: Protocol,
+    /// `None` for DoH endpoints (and custom DoT endpoints without a fixed address).
+    pub addr: Option<SocketAddr>,
+    /// Human-readable endpoint (address or encrypted URL).
+    pub endpoint: String,
     /// Median of the lookups of popular sites, in ms.
     pub cached: Option<f64>,
-    /// Median of the lookups of random names, in ms.
+    /// Median of lookups of random names, in ms.
     pub uncached: Option<f64>,
-    /// Fastest cached lookup, in ms.
     pub cached_min: Option<f64>,
-    /// 95th percentile of the cached lookups, in ms.
     pub cached_p95: Option<f64>,
-    /// 99th percentile of the cached lookups, in ms.
     pub cached_p99: Option<f64>,
-    /// Mean of the cached lookups, in ms.
     pub cached_mean: Option<f64>,
-    /// Slowest cached lookup, in ms.
     pub cached_max: Option<f64>,
-    /// Standard deviation of the cached lookups, in ms: how much the times jump around.
     pub cached_jitter: Option<f64>,
     /// Whether the server set the DNSSEC Authenticated Data bit (`None` = could not check).
     pub dnssec: Option<bool>,
+    /// Whether the server correctly rejected `dnssec-failed.org` (`None` = could not check).
+    pub dnssec_bogus: Option<bool>,
     pub timeouts: u32,
     pub note: Note,
     /// What the table is sorted by: lower is better, flagged servers sort last.
@@ -222,33 +136,131 @@ pub struct Row {
 }
 
 impl Row {
-    /// Fast enough to recommend: no flags and at most three failed lookups.
+    /// Measured enough to be useful: no flags, at most three failed lookups and at least one
+    /// completed timing.
     pub fn healthy(&self) -> bool {
-        self.note == Note::Ok && self.timeouts <= 3
+        self.note == Note::Ok
+            && self.timeouts <= 3
+            && (self.cached.is_some() || self.uncached.is_some())
+    }
+
+    /// Healthy and fully measured, so it can be recommended as a system resolver.
+    pub fn recommendable(&self) -> bool {
+        self.healthy()
+            && self.cached.is_some()
+            && self.uncached.is_some()
+            && self.security_status() != SecurityStatus::BogusAccepted
+    }
+
+    pub fn is_doh(&self) -> bool {
+        self.transport == Protocol::Doh
+    }
+
+    pub fn is_plain(&self) -> bool {
+        self.transport.is_plain()
+    }
+
+    pub fn security_status(&self) -> SecurityStatus {
+        match (self.dnssec, self.dnssec_bogus) {
+            (_, Some(false)) => SecurityStatus::BogusAccepted,
+            (Some(true), Some(true)) => SecurityStatus::Validated,
+            (Some(true), _) => SecurityStatus::Partial,
+            (Some(false), _) => SecurityStatus::Insecure,
+            (None, _) => SecurityStatus::Unknown,
+        }
+    }
+
+    /// The address that could be applied to the system resolver, if any.
+    pub fn plain_ip(&self) -> Option<IpAddr> {
+        self.addr.map(|a| a.ip())
+    }
+}
+
+/// Which Cloudflare data center answers you (tells you how far your ISP routes you).
+pub async fn cloudflare_data_center() -> Option<String> {
+    let cloudflare = SocketAddr::from(([1, 1, 1, 1], 53));
+    let r = query_ext(
+        cloudflare,
+        "id.server",
+        TYPE_TXT,
+        CLASS_CH,
+        Duration::from_secs(2),
+        false,
+    )
+    .await?;
+    r.txt
+}
+
+/// One lookup on the transport carried by the candidate. For plain candidates `protocol`
+/// selects UDP or TCP; DoT/DoH candidates ignore it.
+///
+/// If a UDP reply is truncated, the query is retried over TCP automatically.
+pub async fn lookup(
+    candidate: &Candidate,
+    protocol: Protocol,
+    name: &str,
+    qtype: u16,
+    qclass: u16,
+    wait: Duration,
+    dnssec: bool,
+) -> Option<Reply> {
+    match &candidate.target {
+        Target::Plain(addr) => match protocol {
+            Protocol::Udp => {
+                let reply = query_ext(*addr, name, qtype, qclass, wait, dnssec).await?;
+                if reply.tc {
+                    query_tcp_ext(*addr, name, qtype, qclass, wait, dnssec).await
+                } else {
+                    Some(reply)
+                }
+            }
+            Protocol::Tcp => query_tcp_ext(*addr, name, qtype, qclass, wait, dnssec).await,
+            Protocol::Dot | Protocol::Doh => None,
+        },
+        Target::Dot { addr, host, port } => {
+            query_dot(*addr, host, *port, name, qtype, qclass, wait, dnssec).await
+        }
+        Target::Doh { url } => {
+            if qtype != TYPE_A || qclass != CLASS_IN {
+                return None;
+            }
+            doh_query(url, name, wait).await
+        }
     }
 }
 
 /// Fills the resolver's cache before measuring. Without this, the first run against a server is
 /// slower than later runs (the popular names are not cached yet), which made rankings depend on
 /// who ran the benchmark before. The lookups run together and are not timed or counted.
-async fn warm_up(addr: SocketAddr, wait: Duration, tcp: bool) {
+async fn warm_up(
+    candidate: &Candidate,
+    protocol: Protocol,
+    wait: Duration,
+    cancel: Arc<AtomicBool>,
+) {
     let mut set = JoinSet::new();
     for domain in DOMAINS {
+        let candidate = candidate.clone();
+        let cancel = cancel.clone();
         set.spawn(async move {
-            if tcp {
-                let _ = query_tcp(addr, domain, TYPE_A, CLASS_IN, wait).await;
-            } else {
-                let _ = query(addr, domain, TYPE_A, CLASS_IN, wait).await;
+            if !cancel.load(Ordering::Relaxed) {
+                let _ = lookup(&candidate, protocol, domain, TYPE_A, CLASS_IN, wait, false).await;
             }
         });
     }
     while set.join_next().await.is_some() {}
 }
 
-/// Tests one server over UDP or TCP: 30 lookups of popular sites (cached) and 5 lookups of
-/// random names that cannot exist (uncached; the answer must be NXDOMAIN). `repeat` pools
-/// several rounds so a noisy connection produces a steadier median.
-pub async fn full_test(c: Candidate, wait: Duration, repeat: usize, tcp: bool) -> Row {
+/// Tests one server: 30 lookups of popular sites (cached) and 5 lookups of random names that
+/// should not exist (uncached). `repeat` pools several rounds so a noisy connection produces a
+/// steadier median. Two extra queries check DNSSEC and a deliberately broken signature.
+pub async fn full_test(
+    candidate: Candidate,
+    protocol: Protocol,
+    wait: Duration,
+    repeat: usize,
+    cancel: Arc<AtomicBool>,
+) -> Row {
     let repeat = repeat.max(1);
     let max_fails = MAX_FAILS.saturating_mul(repeat as u32);
     let mut cached: Vec<f64> = Vec::new();
@@ -257,19 +269,22 @@ pub async fn full_test(c: Candidate, wait: Duration, repeat: usize, tcp: bool) -
     let mut hijacks = 0u32;
     let mut unreliable = false;
 
-    warm_up(c.addr, wait, tcp).await;
+    warm_up(&candidate, protocol, wait, cancel.clone()).await;
 
     'rounds: for _ in 0..repeat {
+        if cancel.load(Ordering::Relaxed) {
+            unreliable = true;
+            break;
+        }
         for domain in DOMAINS {
             for _ in 0..ROUNDS {
-                let r = if tcp {
-                    query_tcp(c.addr, domain, TYPE_A, CLASS_IN, wait).await
-                } else {
-                    query(c.addr, domain, TYPE_A, CLASS_IN, wait).await
-                };
-                match r {
+                if cancel.load(Ordering::Relaxed) {
+                    unreliable = true;
+                    break 'rounds;
+                }
+                match lookup(&candidate, protocol, domain, TYPE_A, CLASS_IN, wait, false).await {
                     Some(r) if r.rcode == 0 && r.answers > 0 && !r.addrs.is_empty() => {
-                        cached.push(ms(r.rtt))
+                        cached.push(ms(r.rtt));
                     }
                     _ => {
                         fails += 1;
@@ -283,21 +298,20 @@ pub async fn full_test(c: Candidate, wait: Duration, repeat: usize, tcp: bool) -
         }
 
         for _ in 0..RANDOM_LOOKUPS {
+            if cancel.load(Ordering::Relaxed) {
+                unreliable = true;
+                break 'rounds;
+            }
             let name = format!(
                 "dnsbench-{:x}-{:x}-{:x}.com",
                 rand64() & 0xFFFF_FFFF,
                 rand64() & 0xFFFF_FFFF,
                 rand64() & 0xFFFF_FFFF
             );
-            let r = if tcp {
-                query_tcp(c.addr, &name, TYPE_A, CLASS_IN, wait).await
-            } else {
-                query(c.addr, &name, TYPE_A, CLASS_IN, wait).await
-            };
-            match r {
+            match lookup(&candidate, protocol, &name, TYPE_A, CLASS_IN, wait, false).await {
                 Some(r) if r.rcode == 3 => uncached.push(ms(r.rtt)),
                 Some(r) if r.rcode == 0 && r.answers > 0 && !r.addrs.is_empty() => {
-                    hijacks += 1; // a fake answer for a name that does not exist
+                    hijacks += 1; // a fake answer for a name that should not exist
                     uncached.push(ms(r.rtt));
                 }
                 _ => {
@@ -311,7 +325,6 @@ pub async fn full_test(c: Candidate, wait: Duration, repeat: usize, tcp: bool) -
         }
     }
 
-    // a server that fails too many lookups is flagged, but we still show what it did manage
     if fails >= max_fails {
         unreliable = true;
     }
@@ -334,18 +347,38 @@ pub async fn full_test(c: Candidate, wait: Duration, repeat: usize, tcp: bool) -
     } else {
         Note::Ok
     };
-    // Ask a signed name with DNSSEC enabled: the AD bit tells us whether the server validates.
-    // One extra lookup, and a failure here never counts against the server.
-    let dnssec = if unreliable {
-        None
+
+    // DNSSEC checks: one signed name must have the AD bit, and one deliberately broken name
+    // must be rejected. Failures here never count against the resolver's latency score.
+    let (dnssec, dnssec_bogus) = if unreliable || cancel.load(Ordering::Relaxed) {
+        (None, None)
     } else {
-        let q = if tcp {
-            query_tcp(c.addr, "cloudflare.com", TYPE_A, CLASS_IN, wait).await
-        } else {
-            query_ext(c.addr, "cloudflare.com", TYPE_A, CLASS_IN, wait, true).await
-        };
-        q.filter(|r| r.rcode == 0).map(|r| r.ad)
+        let ad = lookup(
+            &candidate,
+            protocol,
+            "cloudflare.com",
+            TYPE_A,
+            CLASS_IN,
+            wait,
+            true,
+        )
+        .await
+        .filter(|r| r.rcode == 0)
+        .map(|r| r.ad);
+        let bogus = lookup(
+            &candidate,
+            protocol,
+            "dnssec-failed.org",
+            TYPE_A,
+            CLASS_IN,
+            wait,
+            true,
+        )
+        .await
+        .map(|r| r.rcode == 2);
+        (ad, bogus)
     };
+
     let base = match (cached_median, uncached_median) {
         (Some(a), Some(b)) => (a + b) / 2.0,
         (Some(a), None) | (None, Some(a)) => 1.0e6 + a, // only half measured
@@ -357,9 +390,12 @@ pub async fn full_test(c: Candidate, wait: Duration, repeat: usize, tcp: bool) -
         Note::Unreliable => 10_000.0,
     };
     Row {
-        addr: c.addr,
-        name: c.name,
-        is_doh: false,
+        id: candidate.id.clone(),
+        provider: candidate.provider.clone(),
+        label: candidate.label.clone(),
+        transport: protocol,
+        addr: candidate.plain_addr(),
+        endpoint: candidate.endpoint(),
         cached: cached_median,
         uncached: uncached_median,
         cached_min,
@@ -369,149 +405,147 @@ pub async fn full_test(c: Candidate, wait: Duration, repeat: usize, tcp: bool) -
         cached_mean,
         cached_jitter,
         dnssec,
+        dnssec_bogus,
         timeouts: fails,
         note,
         score: base + penalty,
     }
 }
 
-/// Tests one DNS-over-HTTPS provider. Instead of port-53 lookups, we send one HTTPS GET per
-/// round and measure the response time.
-pub async fn full_test_doh(provider: DohProvider, wait: Duration, repeat: usize) -> Row {
-    let repeat = repeat.max(1);
-    let max_fails = MAX_FAILS.saturating_mul(repeat as u32);
-    let mut cached: Vec<f64> = Vec::new();
-    let mut uncached: Vec<f64> = Vec::new();
-    let mut fails = 0u32;
-    let mut hijacks = 0u32;
-    let mut unreliable = false;
+/// Quick scan: one lookup per candidate. Two attempts are made for known providers on plain
+/// DNS; encrypted endpoints get one. Returns the candidates that answered and the measured RTT.
+pub async fn quick_scan(
+    candidates: Vec<Candidate>,
+    protocol: Protocol,
+    wait: Duration,
+    cancel: Arc<AtomicBool>,
+    mut on_done: impl FnMut(usize, usize),
+) -> (Vec<(Candidate, f64)>, bool) {
+    let total = candidates.len();
+    let sem = Arc::new(Semaphore::new(SCAN_JOBS));
+    let mut set: JoinSet<(Candidate, Option<f64>)> = JoinSet::new();
+    for candidate in candidates {
+        let sem = sem.clone();
+        let cancel = cancel.clone();
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            let attempts = if protocol.is_plain() && is_known(&candidate.provider) {
+                2
+            } else {
+                1
+            };
+            let mut best: Option<f64> = None;
+            for _ in 0..attempts {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Some(reply) = lookup(
+                    &candidate,
+                    protocol,
+                    "google.com",
+                    TYPE_A,
+                    CLASS_IN,
+                    wait,
+                    false,
+                )
+                .await
+                    && reply.rcode == 0
+                    && !reply.addrs.is_empty()
+                {
+                    let value = ms(reply.rtt);
+                    best = Some(best.map_or(value, |old: f64| old.min(value)));
+                }
+            }
+            (candidate, best)
+        });
+    }
 
-    'rounds: for _ in 0..repeat {
-        // cached: popular name
-        for domain in DOMAINS {
-            for _ in 0..ROUNDS {
-                match doh_query(provider, domain, wait).await {
-                    Some(r) if r.status == 0 && r.answers > 0 => cached.push(ms(r.rtt)),
-                    _ => {
-                        fails += 1;
-                        if fails >= max_fails {
-                            unreliable = true;
-                            break 'rounds;
-                        }
+    let mut hits = Vec::new();
+    let mut done = 0usize;
+    let mut cancelled = false;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            set.abort_all();
+            cancelled = true;
+            break;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            item = set.join_next() => {
+                match item {
+                    Some(Ok((candidate, Some(rtt)))) => {
+                        hits.push((candidate, rtt));
+                        done += 1;
+                        on_done(done, total);
                     }
+                    Some(Ok((_, None))) => {
+                        done += 1;
+                        on_done(done, total);
+                    }
+                    Some(Err(_)) => {
+                        done += 1;
+                        on_done(done, total);
+                    }
+                    None => break,
                 }
             }
         }
-        // uncached: random name that should not exist
-        for _ in 0..RANDOM_LOOKUPS {
-            let name = format!(
-                "dnsbench-{:x}-{:x}-{:x}.com",
-                rand64() & 0xFFFF_FFFF,
-                rand64() & 0xFFFF_FFFF,
-                rand64() & 0xFFFF_FFFF
-            );
-            match doh_query(provider, &name, wait).await {
-                Some(r) if r.status == 3 => uncached.push(ms(r.rtt)),
-                Some(r) if r.status == 0 && r.answers > 0 => {
-                    hijacks += 1;
-                    uncached.push(ms(r.rtt));
-                }
-                _ => {
-                    fails += 1;
-                    if fails >= max_fails {
-                        unreliable = true;
-                        break 'rounds;
-                    }
-                }
-            }
-        }
     }
-
-    if fails >= max_fails {
-        unreliable = true;
-    }
-    let cached_min = cached.iter().copied().reduce(f64::min);
-    let cached_max = cached.iter().copied().reduce(f64::max);
-    let cached_p95 = percentile(&mut cached.clone(), 95.0);
-    let cached_p99 = percentile(&mut cached.clone(), 99.0);
-    let cached_mean = if cached.is_empty() {
-        None
-    } else {
-        Some(cached.iter().sum::<f64>() / cached.len() as f64)
-    };
-    let cached_jitter = stddev(&cached);
-    let cached_median = median(&mut cached);
-    let uncached_median = median(&mut uncached);
-    let note = if unreliable {
-        Note::Unreliable
-    } else if hijacks > 0 {
-        Note::Hijacks
-    } else {
-        Note::Ok
-    };
-    // DoH servers always validate DNSSEC (they set AD), but we can't verify independently.
-    let dnssec = if unreliable { None } else { Some(true) };
-    let base = match (cached_median, uncached_median) {
-        (Some(a), Some(b)) => (a + b) / 2.0,
-        (Some(a), None) | (None, Some(a)) => 1.0e6 + a,
-        (None, None) => 1.0e9,
-    };
-    let penalty = match note {
-        Note::Ok => 0.0,
-        Note::Hijacks => 5_000.0,
-        Note::Unreliable => 10_000.0,
-    };
-    Row {
-        addr: SocketAddr::from(([0, 0, 0, 0], 53)),
-        name: provider.name().to_string(),
-        is_doh: true,
-        cached: cached_median,
-        uncached: uncached_median,
-        cached_min,
-        cached_max,
-        cached_p95,
-        cached_p99,
-        cached_mean,
-        cached_jitter,
-        dnssec,
-        timeouts: fails,
-        note,
-        score: base + penalty,
-    }
+    hits.sort_by(|a, b| a.1.total_cmp(&b.1));
+    (hits, cancelled)
 }
 
 /// Tests the servers, `jobs` at a time (each server's own lookups run one after another), and
-/// returns the rows best first. `on_done(finished, total)` is called as each server finishes.
+/// returns the rows best first. `on_row` is called as each server finishes; `on_progress` gets
+/// the number finished and the total.
+#[allow(clippy::too_many_arguments)]
 pub async fn full_tests(
     servers: Vec<Candidate>,
+    protocol: Protocol,
     jobs: usize,
     wait: Duration,
     repeat: usize,
-    tcp: bool,
-    mut on_done: impl FnMut(usize, usize),
-) -> Vec<Row> {
+    cancel: Arc<AtomicBool>,
+    mut on_row: impl FnMut(Row),
+    mut on_progress: impl FnMut(usize, usize),
+) -> (Vec<Row>, bool) {
     let total = servers.len();
     let sem = Arc::new(Semaphore::new(jobs.max(1)));
     let mut set: JoinSet<Row> = JoinSet::new();
-    for c in servers {
+    for candidate in servers {
         let sem = sem.clone();
+        let cancel = cancel.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await;
-            match c.doh_provider {
-                Some(provider) => full_test_doh(provider, wait, repeat).await,
-                None => full_test(c, wait, repeat, tcp).await,
-            }
+            full_test(candidate, protocol, wait, repeat, cancel).await
         });
     }
+
     let mut rows = Vec::with_capacity(total);
-    while let Some(res) = set.join_next().await {
-        if let Ok(row) = res {
-            rows.push(row);
-            on_done(rows.len(), total);
+    let mut cancelled = false;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            set.abort_all();
+            cancelled = true;
+            break;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            item = set.join_next() => {
+                match item {
+                    Some(Ok(row)) => {
+                        rows.push(row.clone());
+                        on_row(row);
+                        on_progress(rows.len(), total);
+                    }
+                    Some(Err(_)) => {}
+                    None => break,
+                }
+            }
         }
     }
     rows.sort_by(|a, b| a.score.total_cmp(&b.score));
-    rows
+    (rows, cancelled)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -519,7 +553,7 @@ pub async fn full_tests(
 // ---------------------------------------------------------------------------------------
 
 /// One address a site resolved to, and how reachable it is.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SteerEntry {
     pub ip: IpAddr,
     /// How many of the servers returned this address.
@@ -528,7 +562,7 @@ pub struct SteerEntry {
     pub connects: Vec<Option<f64>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Steering {
     pub host: String,
     /// How many servers were asked.
@@ -552,16 +586,18 @@ pub async fn steering(
     connect_port: u16,
     want_v6: bool,
 ) -> Steering {
-    let mut set: JoinSet<Vec<IpAddr>> = JoinSet::new();
+    let mut set = JoinSet::new();
     for &server in servers {
         let host = host.to_string();
         set.spawn(async move {
             let wait = Duration::from_secs(2);
             let mut ips = Vec::new();
-            if let Some(r) = query(server, &host, TYPE_A, CLASS_IN, wait).await {
+            if let Some(r) = query_ext(server, &host, TYPE_A, CLASS_IN, wait, false).await {
                 ips.extend(r.addrs);
             }
-            if want_v6 && let Some(r) = query(server, &host, TYPE_AAAA, CLASS_IN, wait).await {
+            if want_v6
+                && let Some(r) = query_ext(server, &host, TYPE_AAAA, CLASS_IN, wait, false).await
+            {
                 ips.extend(r.addrs);
             }
             ips
@@ -578,7 +614,7 @@ pub async fn steering(
     }
 
     let sem = Arc::new(Semaphore::new(CONNECT_JOBS));
-    let mut set: JoinSet<(IpAddr, Vec<Option<f64>>)> = JoinSet::new();
+    let mut set = JoinSet::new();
     for &ip in counts.keys() {
         let sem = sem.clone();
         set.spawn(async move {
@@ -615,20 +651,16 @@ pub async fn steering(
     }
 }
 
-/// The port-53 servers used for steering checks: healthy, fastest first, DoH rows excluded.
+/// The port-53 servers used for steering checks: healthy, fastest first, encrypted rows excluded.
 fn steering_targets(rows: &[Row]) -> Vec<SocketAddr> {
     rows.iter()
-        .filter(|r| r.healthy() && !r.is_doh)
+        .filter(|r| r.healthy() && r.is_plain())
         .take(10)
-        .map(|r| r.addr)
+        .filter_map(|r| r.addr)
         .collect()
 }
 
 /// Runs a steering check for every hostname, in the order the user supplied them.
-///
-/// DNS-over-HTTPS rows are skipped: their placeholder address is not a real DNS server that can
-/// be asked about a hostname. The hosts are checked against the ten fastest healthy port-53
-/// servers.
 pub async fn steerings(
     hosts: &[String],
     rows: &[Row],
@@ -658,118 +690,122 @@ pub async fn steerings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::servers::{Candidate, parse_addr};
 
-    fn cand(addr: &str, name: &str) -> Candidate {
-        Candidate {
-            addr: crate::servers::parse_addr(addr).unwrap(),
-            name: name.to_string(),
-            doh_provider: None,
-        }
+    fn candidate(addr: &str, name: &str) -> Candidate {
+        Candidate::plain(parse_addr(addr).unwrap(), name, name)
     }
 
-    #[test]
-    fn shortlist_takes_the_fastest_of_each_kind_and_always_your_current_dns() {
-        let scan = vec![
-            (cand("1.1.1.1", "Cloudflare"), 10.0),
-            (cand("5.5.5.5", OTHER), 11.0),
-            (cand("8.8.8.8", "Google"), 12.0),
-            (cand("6.6.6.6", OTHER), 13.0),
-            (cand("9.9.9.9", "Quad9"), 14.0),
-            (cand("7.7.7.7", "Slow"), 99.0),
-        ];
-        let s = shortlist(
-            &scan,
-            2,
-            1,
-            &["7.7.7.7".parse().unwrap(), "4.4.4.4".parse().unwrap()],
-        );
-        let got: Vec<String> = s.servers.iter().map(|c| c.addr.ip().to_string()).collect();
-        assert_eq!(got, ["1.1.1.1", "5.5.5.5", "8.8.8.8", "7.7.7.7"]);
-        assert_eq!(s.silent_current, vec!["4.4.4.4".parse::<IpAddr>().unwrap()]);
-    }
-
-    #[test]
-    fn router_current_and_added_servers_do_not_consume_known_slots() {
-        let scan = vec![
-            (cand("192.168.1.1", crate::servers::ROUTER), 1.0),
-            (cand("5.5.5.5", crate::servers::CUSTOM), 2.0),
-            (cand("1.1.1.1", "Cloudflare"), 10.0),
-            (cand("8.8.8.8", "Google"), 12.0),
-        ];
-        let s = shortlist(&scan, 1, 0, &[]);
-        let got: Vec<String> = s.servers.iter().map(|c| c.addr.ip().to_string()).collect();
-        assert_eq!(got, ["192.168.1.1", "5.5.5.5", "1.1.1.1"]);
-    }
-
-    #[test]
-    fn a_current_dns_on_another_port_is_not_the_same_server() {
-        let scan = vec![(cand("1.1.1.1:5353", "Local"), 1.0)];
-        let s = shortlist(&scan, 0, 0, &["1.1.1.1".parse().unwrap()]);
-        assert!(s.servers.is_empty());
-        assert_eq!(s.silent_current.len(), 1);
-    }
-
-    #[test]
-    fn healthy_means_no_flag_and_few_timeouts() {
-        let mut row = Row {
-            addr: "1.1.1.1:53".parse().unwrap(),
-            name: "x".into(),
-            is_doh: false,
-            cached: Some(1.0),
-            uncached: Some(1.0),
-            cached_min: Some(1.0),
-            cached_max: Some(2.0),
-            cached_p95: Some(1.0),
-            cached_p99: Some(1.5),
-            cached_mean: Some(1.0),
-            cached_jitter: Some(0.0),
-            dnssec: Some(true),
-            timeouts: 3,
-            note: Note::Ok,
-            score: 1.0,
-        };
-        assert!(row.healthy());
-        row.timeouts = 4;
-        assert!(!row.healthy());
-        row.timeouts = 0;
-        row.note = Note::Hijacks;
-        assert!(!row.healthy());
-    }
-
-    fn result_row(addr: &str, is_doh: bool, note: Note, timeouts: u32) -> Row {
+    fn row(name: &str, note: Note, timeouts: u32) -> Row {
         Row {
-            addr: addr.parse().unwrap(),
-            name: "x".into(),
-            is_doh,
-            cached: Some(1.0),
-            uncached: Some(1.0),
-            cached_min: Some(1.0),
-            cached_max: Some(1.0),
-            cached_p95: Some(1.0),
-            cached_p99: Some(1.0),
-            cached_mean: Some(1.0),
-            cached_jitter: Some(0.0),
-            dnssec: None,
+            id: name.to_string(),
+            provider: name.to_string(),
+            label: name.to_string(),
+            transport: Protocol::Udp,
+            addr: Some("1.1.1.1:53".parse().unwrap()),
+            endpoint: "1.1.1.1".into(),
+            cached: Some(10.0),
+            uncached: Some(20.0),
+            cached_min: Some(9.0),
+            cached_p95: Some(15.0),
+            cached_p99: Some(18.0),
+            cached_mean: Some(12.0),
+            cached_max: Some(20.0),
+            cached_jitter: Some(2.0),
+            dnssec: Some(true),
+            dnssec_bogus: Some(true),
             timeouts,
             note,
-            score: 1.0,
+            score: 15.0,
         }
     }
 
     #[test]
-    fn steering_targets_skip_doh_flagged_rows_and_cap_at_ten() {
-        let rows = vec![
-            result_row("0.0.0.0:53", true, Note::Ok, 0),
-            result_row("1.1.1.1:53", false, Note::Hijacks, 0),
-            result_row("8.8.8.8:53", false, Note::Ok, 4),
-            result_row("9.9.9.9:53", false, Note::Ok, 0),
-        ];
-        let targets = steering_targets(&rows);
-        assert_eq!(targets, vec!["9.9.9.9:53".parse().unwrap()]);
+    fn a_row_needs_a_measurement_to_be_healthy() {
+        let mut r = row("ok", Note::Ok, 0);
+        assert!(r.healthy());
+        r.cached = None;
+        r.uncached = None;
+        assert!(!r.healthy());
+        let mut r = row("hijack", Note::Hijacks, 0);
+        assert!(!r.healthy());
+        r.note = Note::Unreliable;
+        assert!(!r.healthy());
+    }
 
-        let many: Vec<Row> = (1..=12)
-            .map(|i| result_row(&format!("192.0.2.{i}:53"), false, Note::Ok, 0))
-            .collect();
-        assert_eq!(steering_targets(&many).len(), 10);
+    #[test]
+    fn security_status_combines_ad_and_bogus_checks() {
+        let mut r = row("validated", Note::Ok, 0);
+        assert_eq!(r.security_status(), SecurityStatus::Validated);
+        r.dnssec_bogus = Some(false);
+        assert_eq!(r.security_status(), SecurityStatus::BogusAccepted);
+        r.dnssec = Some(false);
+        assert_eq!(r.security_status(), SecurityStatus::BogusAccepted);
+        r.dnssec_bogus = Some(true);
+        assert_eq!(r.security_status(), SecurityStatus::Insecure);
+        r.dnssec = Some(true);
+        r.dnssec_bogus = None;
+        assert_eq!(r.security_status(), SecurityStatus::Partial);
+        r.dnssec = None;
+        assert_eq!(r.security_status(), SecurityStatus::Unknown);
+    }
+
+    #[test]
+    fn recommendable_requires_both_medians() {
+        let mut r = row("half", Note::Ok, 0);
+        r.uncached = None;
+        assert!(!r.recommendable());
+        r.uncached = Some(20.0);
+        assert!(r.recommendable());
+        r.dnssec_bogus = Some(false);
+        assert!(!r.recommendable());
+    }
+
+    #[tokio::test]
+    async fn quick_scan_skips_silent_servers_and_ranks_the_rest() {
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let silent_addr = silent.local_addr().unwrap();
+        let mut list = vec![candidate(&silent_addr.to_string(), "silent")];
+        assert!(!list.is_empty());
+        let (hits, cancelled) = quick_scan(
+            std::mem::take(&mut list),
+            Protocol::Udp,
+            Duration::from_millis(150),
+            Arc::new(AtomicBool::new(false)),
+            |_, _| {},
+        )
+        .await;
+        assert!(hits.is_empty());
+        assert!(!cancelled);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_scan_returns_partial_results() {
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = silent.local_addr().unwrap();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let (hits, cancelled) = quick_scan(
+            vec![candidate(&addr.to_string(), "silent")],
+            Protocol::Udp,
+            Duration::from_millis(50),
+            cancel,
+            |_, _| {},
+        )
+        .await;
+        assert!(hits.is_empty());
+        assert!(cancelled);
+    }
+
+    #[test]
+    fn steering_targets_are_plain_healthy_and_best_first() {
+        let mut bad = row("bad", Note::Hijacks, 0);
+        bad.transport = Protocol::Udp;
+        let mut doh = row("doh", Note::Ok, 0);
+        doh.transport = Protocol::Doh;
+        doh.addr = None;
+        let rows = vec![row("ok", Note::Ok, 0), bad, doh];
+        let targets = steering_targets(&rows);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].ip(), "1.1.1.1".parse::<IpAddr>().unwrap());
     }
 }

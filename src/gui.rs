@@ -1,593 +1,2649 @@
-//! Graphical interface for dnsrace using egui/eframe.
+//! The native desktop interface.
 //!
-//! Compiled only with the `gui` feature. Launched with `dnsrace --gui`.
+//! The layout is intentionally simple: a server picker on the left, a toolbar on top, and the
+//! results plus apply/export actions on the right. All long operations run on background
+//! threads so the window keeps painting while DNS queries time out or an administrator prompt
+//! is open.
 
-use std::net::SocketAddr;
-use std::sync::mpsc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use eframe::egui;
+use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke, Vec2};
+use egui_extras::{Column, TableBuilder};
 
-use crate::cli::{self, Config};
+use crate::bench::{Note, Row, SecurityStatus, Steering};
+use crate::config::{self, CustomResolver, HistoryEntry, Settings, Theme};
+use crate::engine::{self, RunEvent, RunRequest, RunResult, Stage};
+use crate::platform::{self, AppliedDns};
+use crate::providers;
 use crate::report;
+use crate::servers::{self, Candidate, Category, Family, Kind, Pool, Protocol};
+use crate::system::SystemInfo;
 
-/// Message sent from the benchmark thread to the GUI.
-enum GuiMsg {
-    /// Progress: (done, total, elapsed_seconds)
-    Progress(usize, usize, f64),
-    /// The benchmark finished with the result text and exit code.
-    Finished(String, u8),
-    /// An error message.
-    Error(String),
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const ACCENT: Color32 = Color32::from_rgb(105, 167, 255);
+const GREEN: Color32 = Color32::from_rgb(78, 214, 161);
+const YELLOW: Color32 = Color32::from_rgb(241, 197, 107);
+const RED: Color32 = Color32::from_rgb(255, 123, 123);
+
+/// Starts the graphical application. There is no terminal/CLI mode in 0.6.0.
+pub fn run() -> eframe::Result {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("dnsrace")
+        .with_app_id("io.github.yousef_mohamed22.dnsrace")
+        .with_inner_size([1240.0, 800.0])
+        .with_min_inner_size([1000.0, 620.0]);
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/icon-256.png"))
+    {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions {
+        viewport,
+        centered: true,
+        ..Default::default()
+    };
+    eframe::run_native(
+        "dnsrace",
+        options,
+        Box::new(|_cc| Ok(Box::new(DnsRaceGui::new()))),
+    )
 }
 
-/// The GUI application state.
-pub struct DnsRaceGui {
-    /// Hostnames to test (one per line).
-    hosts: String,
-    /// Whether to test DNS-over-HTTPS providers.
-    doh: bool,
-    /// Query over TCP instead of UDP.
-    tcp: bool,
-    /// Per-lookup timeout in ms.
-    timeout_ms: String,
-    /// Number of concurrent servers to test.
-    jobs: String,
-    /// Repeat count (1-5).
-    repeat: String,
-    /// Address family filter.
-    family: Family,
-    /// Output format.
-    format: OutputFormat,
-    /// Verbose output.
-    verbose: bool,
-    /// Whether to auto-detect router/current DNS/country.
-    detect: bool,
-    /// Test nearby country resolvers.
-    nearby: bool,
-    /// Whether a benchmark is currently running.
-    running: bool,
-    /// Result text from the last run.
-    result: Option<String>,
-    /// Exit code from the last run.
-    exit_code: u8,
-    /// Progress (done, total, elapsed).
-    progress: Option<(usize, usize, f64)>,
-    /// Error message.
-    error: Option<String>,
-    /// Receiver for benchmark messages.
-    rx: Option<mpsc::Receiver<GuiMsg>>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortKey {
+    Score,
+    Cached,
+    Uncached,
+    Provider,
+    Security,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Family {
-    Any,
-    V4,
-    V6,
-}
+impl SortKey {
+    const ALL: [SortKey; 5] = [
+        SortKey::Score,
+        SortKey::Cached,
+        SortKey::Uncached,
+        SortKey::Provider,
+        SortKey::Security,
+    ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OutputFormat {
-    Table,
-    Json,
-    Csv,
-    Quiet,
-}
-
-impl Default for DnsRaceGui {
-    fn default() -> Self {
-        Self {
-            hosts: String::new(),
-            doh: false,
-            tcp: false,
-            timeout_ms: "1000".to_string(),
-            jobs: "16".to_string(),
-            repeat: "1".to_string(),
-            family: Family::Any,
-            format: OutputFormat::Table,
-            verbose: false,
-            detect: true,
-            nearby: false,
-            running: false,
-            result: None,
-            exit_code: 0,
-            progress: None,
-            error: None,
-            rx: None,
+    const fn label(self) -> &'static str {
+        match self {
+            SortKey::Score => "Score",
+            SortKey::Cached => "Cached latency",
+            SortKey::Uncached => "Uncached latency",
+            SortKey::Provider => "Provider",
+            SortKey::Security => "DNSSEC",
         }
     }
+}
+
+#[derive(Clone)]
+struct CustomDraft {
+    name: String,
+    protocol: Protocol,
+    endpoint: String,
+    address: String,
+    error: Option<String>,
+}
+
+impl Default for CustomDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            protocol: Protocol::Doh,
+            endpoint: String::new(),
+            address: String::new(),
+            error: None,
+        }
+    }
+}
+
+struct Notice {
+    text: String,
+    error: bool,
+}
+
+#[derive(Clone)]
+struct PendingApply {
+    label: String,
+    addresses: Vec<IpAddr>,
+    warning: Option<String>,
+}
+
+/// The whole application state. Results are kept as structured rows; the UI never parses text
+/// to decide what to show.
+pub struct DnsRaceGui {
+    settings: Settings,
+    catalog: Vec<Candidate>,
+    system: SystemInfo,
+    current_dns: Vec<IpAddr>,
+    gateway: Option<IpAddr>,
+    data_center: Option<String>,
+    history: Vec<HistoryEntry>,
+    applied: Option<AppliedDns>,
+
+    result: Option<RunResult>,
+    live_rows: Vec<Row>,
+    chosen_id: Option<String>,
+    running: bool,
+    stage: Stage,
+    progress: (usize, usize),
+    started: Option<Instant>,
+    cancel: Arc<AtomicBool>,
+    events: Option<mpsc::Receiver<RunEvent>>,
+
+    apply_rx: Option<mpsc::Receiver<Result<AppliedDns, String>>>,
+    apply_running: bool,
+    revert_rx: Option<mpsc::Receiver<Result<(), String>>>,
+    revert_running: bool,
+    pending_apply: Option<PendingApply>,
+    confirm_revert: bool,
+
+    search: String,
+    result_filter: String,
+    sort: SortKey,
+    notice: Option<Notice>,
+    theme_applied: Option<Theme>,
+
+    show_settings: bool,
+    show_custom: bool,
+    show_history: bool,
+    show_about: bool,
+    custom: CustomDraft,
+    export_dir_text: String,
 }
 
 impl DnsRaceGui {
-    pub fn new() -> Self {
-        Self::default()
+    fn new() -> Self {
+        let settings = config::load_settings();
+        let system = engine::detect_system();
+        let history = config::load_history();
+        let applied = config::load_applied();
+        let export_dir_text = settings
+            .export_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        let current_dns = system.dns.clone();
+        let gateway = system.gateway;
+        let mut app = Self {
+            settings,
+            catalog: Vec::new(),
+            system,
+            current_dns,
+            gateway,
+            data_center: None,
+            history,
+            applied,
+            result: None,
+            live_rows: Vec::new(),
+            chosen_id: None,
+            running: false,
+            stage: Stage::Scan,
+            progress: (0, 0),
+            started: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            events: None,
+            apply_rx: None,
+            apply_running: false,
+            revert_rx: None,
+            revert_running: false,
+            pending_apply: None,
+            confirm_revert: false,
+            search: String::new(),
+            result_filter: String::new(),
+            sort: SortKey::Score,
+            notice: None,
+            theme_applied: None,
+            show_settings: false,
+            show_custom: false,
+            show_history: false,
+            show_about: false,
+            custom: CustomDraft::default(),
+            export_dir_text,
+        };
+        app.rebuild_catalog();
+        app
     }
 
-    /// Check for messages from the benchmark thread (non-blocking).
-    fn poll_messages(&mut self) {
-        use std::sync::mpsc::TryRecvError;
-
-        let rx = match self.rx.take() {
-            Some(rx) => rx,
-            None => return,
-        };
-        let mut finished = false;
-        loop {
-            match rx.try_recv() {
-                Ok(GuiMsg::Progress(done, total, elapsed)) => {
-                    self.progress = Some((done, total, elapsed));
-                }
-                Ok(GuiMsg::Finished(text, code)) => {
-                    self.running = false;
-                    self.result = Some(text);
-                    self.exit_code = code;
-                    self.progress = None;
-                    finished = true;
-                }
-                Ok(GuiMsg::Error(err)) => {
-                    self.running = false;
-                    self.error = Some(err);
-                    self.progress = None;
-                    finished = true;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    if !finished {
-                        self.running = false;
-                        self.error = Some("The benchmark thread stopped unexpectedly.".to_string());
-                        self.progress = None;
-                    }
-                    return;
+    fn rebuild_catalog(&mut self) {
+        let mut pool = Pool::default();
+        let catalog = providers::catalog(self.settings.protocol, self.settings.family);
+        if self.settings.include_system && self.settings.protocol.is_plain() {
+            for candidate in providers::system_candidates(&self.system, &catalog) {
+                if family_allows(&candidate, self.settings.family) {
+                    pool.add(candidate);
                 }
             }
         }
-        if !finished {
-            self.rx = Some(rx);
+        for candidate in catalog {
+            pool.add(candidate);
+        }
+        for custom in &self.settings.custom {
+            let Ok(candidate) = custom_candidate(custom) else {
+                continue;
+            };
+            let kind_ok = match self.settings.protocol {
+                Protocol::Udp | Protocol::Tcp => candidate.kind() == Kind::Plain,
+                Protocol::Dot => candidate.kind() == Kind::Dot,
+                Protocol::Doh => candidate.kind() == Kind::Doh,
+            };
+            if kind_ok && family_allows(&candidate, self.settings.family) {
+                pool.add(candidate);
+            }
+        }
+        self.catalog = pool.into_items();
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(error) = config::save_settings(&self.settings) {
+            self.notify(format!("Could not save settings: {error}"), true);
         }
     }
 
-    /// Build a Config from the current UI state.
-    fn build_config(&self) -> Config {
-        Config {
-            doh: self.doh,
-            tcp: self.tcp,
-            timeout: Duration::from_millis(
-                self.timeout_ms
-                    .trim()
-                    .parse::<u64>()
-                    .unwrap_or(1000)
-                    .clamp(100, 60_000),
-            ),
-            jobs: self.jobs.trim().parse::<usize>().unwrap_or(16).clamp(1, 64),
-            repeat: self.repeat.trim().parse::<usize>().unwrap_or(1).clamp(1, 5),
-            family: match self.family {
-                Family::Any => cli::Family::Any,
-                Family::V4 => cli::Family::V4,
-                Family::V6 => cli::Family::V6,
-            },
-            format: match self.format {
-                OutputFormat::Table => cli::OutputFormat::Table,
-                OutputFormat::Json => cli::OutputFormat::Json,
-                OutputFormat::Csv => cli::OutputFormat::Csv,
-                OutputFormat::Quiet => cli::OutputFormat::Quiet,
-            },
-            verbose: self.verbose,
-            detect: self.detect,
-            nearby: self.nearby,
-            host: self
-                .hosts
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect(),
-            ..Default::default()
+    fn notify(&mut self, text: impl Into<String>, error: bool) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            error,
+        });
+    }
+
+    fn selected_in_catalog(&self) -> usize {
+        self.catalog
+            .iter()
+            .filter(|candidate| self.settings.selected.contains(&candidate.id))
+            .count()
+    }
+
+    fn approve_theme(&mut self, ctx: &egui::Context) {
+        if self.theme_applied == Some(self.settings.theme) {
+            return;
+        }
+        let dark = self.settings.theme == Theme::Dark;
+        let theme = if dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        };
+        ctx.set_theme(if dark {
+            egui::ThemePreference::Dark
+        } else {
+            egui::ThemePreference::Light
+        });
+        let mut visuals = if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        let (bg, panel, border, hover) = if dark {
+            (
+                Color32::from_rgb(14, 17, 22),
+                Color32::from_rgb(22, 27, 35),
+                Color32::from_rgb(43, 51, 64),
+                Color32::from_rgb(34, 42, 54),
+            )
+        } else {
+            (
+                Color32::from_rgb(241, 244, 249),
+                Color32::from_rgb(255, 255, 255),
+                Color32::from_rgb(215, 221, 230),
+                Color32::from_rgb(236, 241, 248),
+            )
+        };
+        visuals.panel_fill = bg;
+        visuals.window_fill = panel;
+        visuals.faint_bg_color = panel;
+        visuals.extreme_bg_color = bg;
+        visuals.code_bg_color = bg;
+        visuals.hyperlink_color = ACCENT;
+        visuals.selection.bg_fill = Color32::from_rgb(40, 91, 158);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
+        visuals.widgets.inactive.weak_bg_fill = panel;
+        visuals.widgets.inactive.bg_fill = panel;
+        visuals.widgets.hovered.weak_bg_fill = hover;
+        visuals.widgets.active.weak_bg_fill = hover;
+        ctx.set_visuals_of(theme, visuals);
+        ctx.style_mut_of(theme, |style| {
+            style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+            style.spacing.button_padding = Vec2::new(10.0, 6.0);
+            style.spacing.interact_size.y = 24.0;
+        });
+        self.theme_applied = Some(self.settings.theme);
+    }
+
+    fn poll_events(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.events.take() else {
+            return;
+        };
+        let mut keep = true;
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    let terminal = matches!(
+                        event,
+                        RunEvent::Finished(_) | RunEvent::Cancelled(_) | RunEvent::Error(_)
+                    );
+                    self.handle_event(event);
+                    if terminal {
+                        keep = false;
+                        break;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    keep = false;
+                    if self.running {
+                        self.running = false;
+                        self.notify("The benchmark ended unexpectedly. Try again.", true);
+                    }
+                    break;
+                }
+            }
+        }
+        if keep {
+            self.events = Some(rx);
+        }
+        if self.running {
+            ctx.request_repaint_after(Duration::from_millis(80));
         }
     }
 
-    /// Start the benchmark in a background thread.
-    fn start_benchmark(&mut self) {
-        let cfg = self.build_config();
+    fn handle_event(&mut self, event: RunEvent) {
+        match event {
+            RunEvent::Detected {
+                current_dns,
+                gateway,
+                data_center,
+            } => {
+                self.current_dns = current_dns.clone();
+                self.system.dns = current_dns;
+                self.gateway = gateway;
+                self.system.gateway = gateway;
+                if data_center.is_some() {
+                    self.data_center = data_center;
+                }
+            }
+            RunEvent::Stage { stage, done, total } => {
+                self.stage = stage;
+                self.progress = (done, total);
+            }
+            RunEvent::Row(row) => {
+                if !self.live_rows.iter().any(|existing| existing.id == row.id) {
+                    self.live_rows.push(row);
+                }
+            }
+            RunEvent::Finished(result) => {
+                self.running = false;
+                self.stage = Stage::Done;
+                self.progress = (result.tested, result.tested);
+                self.chosen_id = result.best().map(|row| row.id.clone());
+                self.live_rows = result.rows.clone();
+                let entry = HistoryEntry {
+                    timestamp: now(),
+                    protocol: result.protocol,
+                    family: result.family,
+                    duration_secs: result.duration_secs,
+                    data_center: result.data_center.clone(),
+                    current_dns: result.current_dns.clone(),
+                    rows: result.rows.clone(),
+                    steerings: result.steerings.clone(),
+                };
+                match config::push_history(self.history.clone(), entry) {
+                    Ok(history) => self.history = history,
+                    Err(error) => self.notify(format!("Could not save history: {error}"), true),
+                }
+                let message = match result.best() {
+                    Some(row) => {
+                        format!("Finished: {} is fastest at {:.1} ms.", row.label, row.score)
+                    }
+                    None => "Finished, but no resolver completed enough measurements.".to_string(),
+                };
+                self.notify(message, false);
+                self.result = Some(result);
+            }
+            RunEvent::Cancelled(result) => {
+                self.running = false;
+                self.stage = Stage::Done;
+                self.live_rows = result.rows.clone();
+                if result.rows.is_empty() {
+                    self.result = None;
+                } else {
+                    self.chosen_id = result.best().map(|row| row.id.clone());
+                    self.result = Some(result);
+                }
+                self.notify("Benchmark cancelled. Partial results are shown.", false);
+            }
+            RunEvent::Error(error) => {
+                self.running = false;
+                self.stage = Stage::Done;
+                self.notify(error, true);
+            }
+        }
+    }
+
+    fn poll_apply(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = self.apply_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(applied)) => {
+                    self.apply_running = false;
+                    if let Err(error) = config::save_applied(&applied) {
+                        self.notify(
+                            format!(
+                                "DNS was applied, but the revert information could not be saved: {error}"
+                            ),
+                            true,
+                        );
+                    } else {
+                        self.notify(format!("Applied {}.", applied.summary()), false);
+                    }
+                    self.applied = Some(applied);
+                }
+                Ok(Err(error)) => {
+                    self.apply_running = false;
+                    self.notify(format!("Could not apply DNS: {error}"), true);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.apply_rx = Some(rx);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.apply_running = false;
+                    self.notify("The apply operation ended unexpectedly.", true);
+                }
+            }
+        }
+        if let Some(rx) = self.revert_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(())) => {
+                    self.revert_running = false;
+                    if let Err(error) = config::clear_applied() {
+                        self.notify(
+                            format!("DNS was restored, but state cleanup failed: {error}"),
+                            true,
+                        );
+                    } else {
+                        self.notify("Previous DNS settings restored.", false);
+                    }
+                    self.applied = None;
+                }
+                Ok(Err(error)) => {
+                    self.revert_running = false;
+                    self.notify(format!("Could not restore DNS: {error}"), true);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.revert_rx = Some(rx);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.revert_running = false;
+                    self.notify("The revert operation ended unexpectedly.", true);
+                }
+            }
+        }
+        if self.apply_running || self.revert_running {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    fn start_run(&mut self, all: bool) {
+        if self.running {
+            return;
+        }
+        let pool: Vec<Candidate> = if all {
+            self.catalog.clone()
+        } else {
+            self.catalog
+                .iter()
+                .filter(|candidate| self.settings.selected.contains(&candidate.id))
+                .cloned()
+                .collect()
+        };
+        if pool.is_empty() {
+            self.notify(
+                if all {
+                    "There are no servers in this category. Add a custom resolver or choose another protocol."
+                } else {
+                    "Select at least one server, or use Test all."
+                },
+                true,
+            );
+            return;
+        }
+        let request = RunRequest {
+            candidates: pool,
+            protocol: self.settings.protocol,
+            family: self.settings.family,
+            wait: self.settings.timeout(),
+            jobs: self.settings.jobs(),
+            repeat: self.settings.repeat(),
+            hostnames: self.settings.hostnames(),
+            connect_port: self.settings.connect_port.max(1),
+            include_system: self.settings.include_system,
+            include_nearby: self.settings.include_nearby && self.settings.protocol.is_plain(),
+        };
         let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
-        self.running = true;
+        self.events = Some(rx);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.cancel.clone();
         self.result = None;
-        self.error = None;
-        self.progress = None;
+        self.live_rows.clear();
+        self.chosen_id = None;
+        self.notice = None;
+        self.stage = Stage::Scan;
+        self.progress = (0, 0);
+        self.started = Some(Instant::now());
+        self.running = true;
+        let spawned = thread::Builder::new()
+            .name("dnsrace-benchmark".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build();
+                match runtime {
+                    Ok(runtime) => runtime.block_on(engine::run(request, tx, cancel)),
+                    Err(error) => {
+                        let _ = tx.send(RunEvent::Error(format!(
+                            "Could not start the benchmark runtime: {error}"
+                        )));
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            self.running = false;
+            self.events = None;
+            self.notify(
+                format!("Could not start the benchmark thread: {error}"),
+                true,
+            );
+        }
+    }
 
-        let tx_progress = tx.clone();
-        thread::spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
+    fn cancel_run(&mut self) {
+        if self.running {
+            self.cancel.store(true, Ordering::Relaxed);
+            self.notify("Cancelling…", false);
+        }
+    }
+
+    fn apply_candidates(&self) -> Vec<Candidate> {
+        let mut list = providers::catalog(Protocol::Udp, Family::Any);
+        for custom in &self.settings.custom {
+            if let Ok(candidate) = custom_candidate(custom)
+                && candidate.kind() == Kind::Plain
             {
-                Ok(rt) => rt,
-                Err(e) => {
-                    let _ = tx.send(GuiMsg::Error(format!("cannot start async runtime: {e}")));
+                list.push(candidate);
+            }
+        }
+        let extra = providers::system_candidates(&self.system, &list);
+        list.extend(extra);
+        list
+    }
+
+    fn request_apply(&mut self, row: Row) {
+        if !row.is_plain() {
+            self.notify(
+                "Encrypted DNS (DoT/DoH) cannot be applied system-wide here. Run UDP or TCP and choose a plain resolver.",
+                true,
+            );
+            return;
+        }
+        if row.security_status() == SecurityStatus::BogusAccepted {
+            self.notify(
+                "That resolver accepted a deliberately broken DNSSEC signature, so it will not be applied.",
+                true,
+            );
+            return;
+        }
+        let addresses = engine::apply_addresses(&row, &self.apply_candidates());
+        if addresses.is_empty() {
+            self.notify("No usable address was found for that resolver.", true);
+            return;
+        }
+        let warning = if row.healthy() {
+            None
+        } else {
+            Some(format!(
+                "This resolver had {} failed lookups and is marked “{}”. It can still be applied, but it did not rank as healthy.",
+                row.timeouts,
+                row.note.label()
+            ))
+        };
+        self.pending_apply = Some(PendingApply {
+            label: format!("{} ({})", row.label, row.endpoint),
+            addresses,
+            warning,
+        });
+    }
+
+    fn start_apply(&mut self, addresses: Vec<IpAddr>) {
+        if self.apply_running {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.apply_rx = Some(rx);
+        self.apply_running = true;
+        self.notice = Some(Notice {
+            text: "Waiting for permission to change the system DNS settings…".into(),
+            error: false,
+        });
+        let spawned = thread::Builder::new()
+            .name("dnsrace-apply".into())
+            .spawn(move || {
+                let _ = tx.send(platform::apply(&addresses));
+            });
+        if let Err(error) = spawned {
+            self.apply_running = false;
+            self.apply_rx = None;
+            self.notify(
+                format!("Could not start the apply operation: {error}"),
+                true,
+            );
+        }
+    }
+
+    fn start_revert(&mut self) {
+        if self.revert_running {
+            return;
+        }
+        let Some(applied) = self.applied.clone() else {
+            self.notify("There is no saved DNS change to revert.", true);
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.revert_rx = Some(rx);
+        self.revert_running = true;
+        self.notice = Some(Notice {
+            text: "Restoring the previous DNS settings…".into(),
+            error: false,
+        });
+        let spawned = thread::Builder::new()
+            .name("dnsrace-revert".into())
+            .spawn(move || {
+                let _ = tx.send(platform::revert(&applied));
+            });
+        if let Err(error) = spawned {
+            self.revert_running = false;
+            self.revert_rx = None;
+            self.notify(
+                format!("Could not start the revert operation: {error}"),
+                true,
+            );
+        }
+    }
+
+    fn export(&mut self, extension: &str) {
+        let Some(result) = self.result.clone() else {
+            self.notify("Run a benchmark before exporting.", true);
+            return;
+        };
+        let path = config::default_export_path(extension, &self.settings);
+        let text = match extension {
+            "json" => report::json(&result),
+            "csv" => report::csv(&result),
+            "html" => report::html(&result),
+            _ => return,
+        };
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            self.notify(
+                format!("Could not create {}: {error}", parent.display()),
+                true,
+            );
+            return;
+        }
+        match std::fs::write(&path, text) {
+            Ok(()) => self.notify(format!("Saved {}", path.display()), false),
+            Err(error) => self.notify(format!("Could not save {}: {error}", path.display()), true),
+        }
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let mut protocol_change = None;
+        let mut family_change = None;
+        let mut run_all = false;
+        let mut run_selected = false;
+        let mut cancel = false;
+        let mut open_settings = false;
+        let mut open_history = false;
+        let mut open_about = false;
+        let running = self.running;
+        let selected = self.selected_in_catalog();
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("dnsrace").size(25.0).strong().color(ACCENT));
+            ui.label(RichText::new(format!("v{VERSION}")).small().weak());
+            ui.add_space(14.0);
+            for protocol in Protocol::all() {
+                let response = ui.add_enabled(
+                    !running,
+                    egui::Button::selectable(self.settings.protocol == protocol, protocol.label())
+                        .min_size(Vec2::new(54.0, 28.0)),
+                );
+                if response.on_hover_text(protocol.description()).clicked()
+                    && !running
+                    && self.settings.protocol != protocol
+                {
+                    protocol_change = Some(protocol);
+                }
+            }
+            ui.separator();
+            ui.label(RichText::new("Family").small().weak());
+            let mut family = self.settings.family;
+            egui::ComboBox::from_id_salt("family")
+                .selected_text(family.label())
+                .width(118.0)
+                .show_ui(ui, |ui| {
+                    for option in [Family::Any, Family::V4, Family::V6] {
+                        ui.selectable_value(&mut family, option, option.label());
+                    }
+                });
+            if family != self.settings.family {
+                family_change = Some(family);
+            }
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("About").clicked() {
+                    open_about = true;
+                }
+                if ui.button("History").clicked() {
+                    open_history = true;
+                }
+                if ui.button("Settings").clicked() {
+                    open_settings = true;
+                }
+                ui.add_space(4.0);
+                if running {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Cancel").strong())
+                                .fill(RED)
+                                .min_size(Vec2::new(84.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                } else {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Test all").strong())
+                                .fill(ACCENT)
+                                .min_size(Vec2::new(92.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        run_all = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(format!("Test selected ({selected})"))
+                                .min_size(Vec2::new(126.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        run_selected = true;
+                    }
+                }
+            });
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Current DNS:").small().weak());
+            if self.current_dns.is_empty() {
+                ui.label(RichText::new("not detected").small().color(YELLOW));
+            } else {
+                ui.label(RichText::new(format_ip_list(&self.current_dns)).small());
+            }
+            if let Some(gateway) = self.gateway {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Gateway:").small().weak());
+                ui.label(RichText::new(gateway.to_string()).small().monospace());
+            }
+            if let Some(dc) = &self.data_center {
+                ui.add_space(6.0);
+                ui.label(RichText::new("Cloudflare edge:").small().weak());
+                ui.label(RichText::new(dc).small().monospace().color(GREEN));
+            }
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!("{} of {} selected", selected, self.catalog.len()))
+                    .small()
+                    .weak(),
+            );
+            if let Some(applied) = &self.applied {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!("DNS applied · {}", applied.interface))
+                        .small()
+                        .color(GREEN),
+                );
+            }
+        });
+
+        if let Some(protocol) = protocol_change {
+            self.settings.protocol = protocol;
+            self.rebuild_catalog();
+            self.save_settings();
+        }
+        if let Some(family) = family_change {
+            self.settings.family = family;
+            self.rebuild_catalog();
+            self.save_settings();
+        }
+        if run_all {
+            self.start_run(true);
+        }
+        if run_selected {
+            self.start_run(false);
+        }
+        if cancel {
+            self.cancel_run();
+        }
+        if open_settings {
+            self.show_settings = true;
+        }
+        if open_history {
+            self.show_history = true;
+        }
+        if open_about {
+            self.show_about = true;
+        }
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let catalog = self.catalog.clone();
+        let selected = self.settings.selected.clone();
+        let current = self.current_dns.clone();
+        let query = self.search.trim().to_lowercase();
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Servers").size(17.0).strong());
+            ui.label(
+                RichText::new(format!(
+                    "{} of {} selected",
+                    catalog
+                        .iter()
+                        .filter(|candidate| selected.contains(&candidate.id))
+                        .count(),
+                    catalog.len()
+                ))
+                .small()
+                .weak(),
+            );
+        });
+        ui.label(
+            RichText::new(match self.settings.protocol {
+                Protocol::Udp => "Plain DNS on port 53. Fastest and most compatible.",
+                Protocol::Tcp => "Plain DNS over TCP. Useful when UDP port 53 is blocked.",
+                Protocol::Dot => "Encrypted DNS over TLS on port 853.",
+                Protocol::Doh => "Encrypted DNS over HTTPS (RFC 8484).",
+            })
+            .small()
+            .weak(),
+        );
+
+        card_frame(ui).show(ui, |ui| {
+            ui.label(
+                RichText::new("THIS MACHINE")
+                    .size(10.0)
+                    .strong()
+                    .color(ACCENT),
+            );
+            if current.is_empty() {
+                ui.label(
+                    RichText::new("No current DNS detected.")
+                        .small()
+                        .color(YELLOW),
+                );
+            } else {
+                ui.label(RichText::new(format_ip_list(&current)).monospace());
+            }
+            if let Some(gateway) = self.gateway {
+                ui.label(RichText::new(format!("Gateway {gateway}")).small().weak());
+            }
+            if let Some(dc) = &self.data_center {
+                ui.label(
+                    RichText::new(format!("Cloudflare edge {dc}"))
+                        .small()
+                        .weak(),
+                );
+            }
+        });
+
+        ui.horizontal(|ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("+ Add resolver").strong())
+                        .fill(ACCENT)
+                        .min_size(Vec2::new(126.0, 28.0)),
+                )
+                .clicked()
+            {
+                self.custom = CustomDraft::default();
+                self.show_custom = true;
+            }
+            if ui.button("Select all").clicked() {
+                for candidate in &catalog {
+                    self.settings.selected.insert(candidate.id.clone());
+                }
+                self.save_settings();
+            }
+            if ui.button("None").clicked() {
+                for candidate in &catalog {
+                    self.settings.selected.remove(&candidate.id);
+                }
+                self.save_settings();
+            }
+        });
+
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search provider, label or address")
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(2.0);
+
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, candidate) in catalog.iter().enumerate() {
+            if query.is_empty() || matches_filter(candidate, &query) {
+                groups
+                    .entry(candidate.provider.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let visible: Vec<usize> = groups.values().flatten().copied().collect();
+        ui.horizontal(|ui| {
+            if ui.small_button("Select visible").clicked() {
+                for index in &visible {
+                    self.settings.selected.insert(catalog[*index].id.clone());
+                }
+                self.save_settings();
+            }
+            if ui.small_button("Clear visible").clicked() {
+                for index in &visible {
+                    self.settings.selected.remove(&catalog[*index].id);
+                }
+                self.save_settings();
+            }
+            if ui.small_button("Default selection").clicked() {
+                self.settings.selected = providers::default_selection();
+                for candidate in &catalog {
+                    if candidate.is_custom {
+                        self.settings.selected.insert(candidate.id.clone());
+                    }
+                }
+                self.save_settings();
+            }
+        });
+
+        let mut toggles: Vec<(String, bool)> = Vec::new();
+        egui::ScrollArea::vertical()
+            .id_salt("server_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if groups.is_empty() {
+                    ui.add_space(18.0);
+                    ui.label(
+                        RichText::new("No servers match that search.")
+                            .weak()
+                            .italics(),
+                    );
                     return;
                 }
-            };
+                for (provider, indices) in &groups {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(provider).strong().size(13.0));
+                        ui.label(RichText::new(format!("{}", indices.len())).small().weak());
+                    });
+                    for index in indices {
+                        let candidate = &catalog[*index];
+                        let checked = selected.contains(&candidate.id);
+                        ui.horizontal(|ui| {
+                            let mut on = checked;
+                            if ui.checkbox(&mut on, "").changed() {
+                                toggles.push((candidate.id.clone(), on));
+                            }
+                            ui.vertical(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let label = if candidate.label == candidate.provider {
+                                        candidate.endpoint()
+                                    } else {
+                                        candidate.label.clone()
+                                    };
+                                    ui.label(RichText::new(label).strong())
+                                        .on_hover_text(format!(
+                                            "{}\n{}",
+                                            candidate.endpoint(),
+                                            if candidate.note.is_empty() {
+                                                "No notes for this provider."
+                                            } else {
+                                                &candidate.note
+                                            }
+                                        ));
+                                    if candidate
+                                        .plain_addr()
+                                        .is_some_and(|addr| current.contains(&addr.ip()))
+                                    {
+                                        tag(ui, "CURRENT", GREEN);
+                                    }
+                                    if candidate.is_custom {
+                                        tag(ui, "CUSTOM", Color32::from_rgb(185, 140, 255));
+                                    } else if candidate.is_system {
+                                        tag(ui, "SYSTEM", YELLOW);
+                                    } else {
+                                        tag(
+                                            ui,
+                                            candidate.category.label(),
+                                            category_color(candidate.category),
+                                        );
+                                    }
+                                });
+                                ui.label(
+                                    RichText::new(candidate.endpoint())
+                                        .small()
+                                        .weak()
+                                        .monospace(),
+                                );
+                            });
+                        });
+                    }
+                    ui.separator();
+                }
+            });
 
-            let (text, exit_code) =
-                runtime.block_on(run_gui_benchmark(cfg, move |done, total, elapsed| {
-                    let _ = tx_progress.send(GuiMsg::Progress(done, total, elapsed));
-                }));
+        if !toggles.is_empty() {
+            for (id, on) in toggles {
+                if on {
+                    self.settings.selected.insert(id);
+                } else {
+                    self.settings.selected.remove(&id);
+                }
+            }
+            self.save_settings();
+        }
+    }
 
-            let _ = tx.send(GuiMsg::Finished(text, exit_code));
+    fn main_panel(&mut self, ui: &mut egui::Ui) {
+        let result = self.result.clone();
+        let live = self.live_rows.clone();
+        egui::ScrollArea::vertical()
+            .id_salt("main_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if let Some(applied) = self.applied.clone() {
+                    self.applied_banner(ui, &applied);
+                }
+                if self.running {
+                    self.progress_card(ui);
+                    if !live.is_empty() {
+                        ui.add_space(10.0);
+                        self.results_section(ui, &live, true);
+                    }
+                } else if let Some(result) = result.clone() {
+                    self.recommendation_card(ui, &result);
+                    ui.add_space(12.0);
+                    self.results_section(ui, &result.rows, false);
+                    self.steering_section(ui, &result);
+                } else {
+                    self.hero(ui);
+                }
+                ui.add_space(24.0);
+            });
+    }
+
+    fn applied_banner(&mut self, ui: &mut egui::Ui, applied: &AppliedDns) {
+        let dark = ui.visuals().dark_mode;
+        let fill = if dark {
+            Color32::from_rgb(21, 39, 32)
+        } else {
+            Color32::from_rgb(230, 247, 239)
+        };
+        egui::Frame::new()
+            .fill(fill)
+            .stroke(Stroke::new(1.0, Color32::from_rgb(56, 130, 96)))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("DNS is applied").strong().color(GREEN));
+                    ui.label(RichText::new(applied.summary()).small().weak());
+                    ui.label(
+                        RichText::new(format!("· {}", config::applied_age(applied)))
+                            .small()
+                            .weak(),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add_enabled(!self.revert_running, egui::Button::new("Revert"))
+                            .clicked()
+                        {
+                            self.confirm_revert = true;
+                        }
+                    });
+                });
+            });
+        ui.add_space(10.0);
+    }
+
+    fn hero(&mut self, ui: &mut egui::Ui) {
+        card_frame(ui).show(ui, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Find the fastest DNS for this connection.")
+                    .size(28.0)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new(
+                    "Test public resolvers, compare cached and uncached lookups, check DNSSEC, then apply the winner in one click.",
+                )
+                .size(14.0)
+                .weak(),
+            );
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("Test all servers").strong())
+                            .fill(ACCENT)
+                            .min_size(Vec2::new(150.0, 34.0)),
+                    )
+                    .clicked()
+                {
+                    self.start_run(true);
+                }
+                if ui
+                    .add(
+                        egui::Button::new(format!(
+                            "Test selected ({})",
+                            self.selected_in_catalog()
+                        ))
+                        .min_size(Vec2::new(150.0, 34.0)),
+                    )
+                    .clicked()
+                {
+                    self.start_run(false);
+                }
+                if ui.button("Choose in the server list").clicked() {
+                    self.notify("Use the checkboxes on the left to choose servers.", false);
+                }
+            });
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(
+                    "Test all measures every server in the current protocol. Test selected measures only the checked servers. Encrypted modes never apply automatically.",
+                )
+                .small()
+                .weak(),
+            );
         });
+
+        ui.add_space(14.0);
+        ui.columns(2, |columns| {
+            card_frame(&columns[0]).show(&mut columns[0], |ui| {
+                ui.label(RichText::new("What you get").strong());
+                ui.label("· Median cached and uncached latency");
+                ui.label("· Jitter, p95 and p99 timings");
+                ui.label("· DNSSEC validation and bogus-answer checks");
+                ui.label("· NXDOMAIN hijacking detection");
+                ui.label("· JSON, CSV and HTML exports");
+            });
+            card_frame(&columns[1]).show(&mut columns[1], |ui| {
+                ui.label(RichText::new("Safe apply").strong());
+                ui.label("· The previous settings are saved");
+                ui.label("· The system asks for permission");
+                ui.label("· Revert restores the saved settings");
+                ui.label("· Nothing is uploaded or telemetered");
+                if !self.history.is_empty() {
+                    ui.add_space(6.0);
+                    if ui
+                        .link(format!("Open history ({})", self.history.len()))
+                        .clicked()
+                    {
+                        self.show_history = true;
+                    }
+                }
+            });
+        });
+    }
+
+    fn progress_card(&mut self, ui: &mut egui::Ui) {
+        card_frame(ui).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(self.stage.label()).size(18.0).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(format_elapsed(self.started))
+                            .small()
+                            .weak()
+                            .monospace(),
+                    );
+                });
+            });
+            let (done, total) = self.progress;
+            let fraction = if total == 0 {
+                0.0
+            } else {
+                (done as f32 / total as f32).clamp(0.0, 1.0)
+            };
+            let bar = if total == 0 {
+                egui::ProgressBar::new(0.0).animate(true).desired_height(9.0)
+            } else {
+                egui::ProgressBar::new(fraction)
+                    .text(format!("{done} / {total}"))
+                    .desired_height(18.0)
+                    .fill(ACCENT)
+            };
+            ui.add(bar);
+            ui.label(
+                RichText::new(format!(
+                    "{} server{} measured so far",
+                    self.live_rows.len(),
+                    if self.live_rows.len() == 1 { "" } else { "s" }
+                ))
+                .small()
+                .weak(),
+            );
+            if self.stage == Stage::Scan {
+                ui.label(
+                    RichText::new(
+                        "The quick scan finds responders first; the full test then measures cached and uncached latency.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
+        });
+    }
+
+    fn recommendation_card(&mut self, ui: &mut egui::Ui, result: &RunResult) {
+        let best = result.best();
+        let chosen = self
+            .chosen_id
+            .as_ref()
+            .and_then(|id| result.rows.iter().find(|row| &row.id == id))
+            .or(best);
+        let chosen_is_best = match (chosen, best) {
+            (Some(chosen), Some(best)) => chosen.id == best.id,
+            _ => false,
+        };
+        let dark = ui.visuals().dark_mode;
+        let fill = if dark {
+            Color32::from_rgb(24, 37, 53)
+        } else {
+            Color32::from_rgb(232, 241, 253)
+        };
+        let stroke_col = if dark {
+            Color32::from_rgb(52, 82, 122)
+        } else {
+            Color32::from_rgb(170, 198, 235)
+        };
+        egui::Frame::new()
+            .fill(fill)
+            .stroke(Stroke::new(1.0, stroke_col))
+            .corner_radius(14)
+            .inner_margin(egui::Margin::same(18))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(if chosen_is_best {
+                            "RECOMMENDED"
+                        } else {
+                            "SELECTED RESOLVER"
+                        })
+                        .size(10.0)
+                        .strong()
+                        .color(ACCENT),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {} · {} tested in {:.1} s",
+                                result.protocol.label(),
+                                result.family.label(),
+                                result.tested,
+                                result.duration_secs
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
+                });
+                let Some(row) = chosen else {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("No resolver completed enough measurements.")
+                            .size(19.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "The run finished, but every server failed or was flagged. Check the protocol, timeout and network connection.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    return;
+                };
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&row.label).size(27.0).strong());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(&row.endpoint)
+                                    .monospace()
+                                    .color(ACCENT),
+                            );
+                            ui.label(RichText::new(format!("· {}", row.transport.label())).small().weak());
+                            tag(ui, row.security_status().short(), security_color(row.security_status()));
+                            if row.note != Note::Ok {
+                                tag(ui, row.note.label(), RED);
+                            }
+                            if !row.healthy() {
+                                tag(ui, "UNHEALTHY", YELLOW);
+                            }
+                        });
+                        ui.label(
+                            RichText::new(format!(
+                                "Cached {} · Uncached {} · Jitter {} · {} timeouts",
+                                report::fmt_ms(row.cached),
+                                report::fmt_ms(row.uncached),
+                                report::fmt_ms(row.cached_jitter),
+                                row.timeouts
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(format!("{:.1}", row.score))
+                                    .size(32.0)
+                                    .strong()
+                                    .color(ACCENT),
+                            );
+                            ui.label(RichText::new("combined ms").small().weak());
+                        });
+                    });
+                });
+                ui.add_space(8.0);
+                if let Some(warning) = apply_warning(row) {
+                    ui.label(RichText::new(warning).small().color(YELLOW));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    let can_apply = row.is_plain()
+                        && !engine::apply_addresses(row, &self.apply_candidates()).is_empty();
+                    if can_apply {
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("Apply to system").strong())
+                                    .fill(ACCENT)
+                                    .min_size(Vec2::new(136.0, 32.0)),
+                            )
+                            .clicked()
+                        {
+                            self.request_apply(row.clone());
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new(
+                                "Only plain resolvers on port 53 can be applied. DoT, DoH and custom ports are benchmark-only.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
+                    if !chosen_is_best
+                        && let Some(best) = best
+                        && ui.button("Use best").clicked()
+                    {
+                        self.chosen_id = Some(best.id.clone());
+                    }
+                    if ui.button("Copy summary").clicked() {
+                        ui.ctx().copy_text(report::summary_text(result));
+                        self.notify("Summary copied to the clipboard.", false);
+                    }
+                    if ui.button("JSON").clicked() {
+                        self.export("json");
+                    }
+                    if ui.button("CSV").clicked() {
+                        self.export("csv");
+                    }
+                    if ui.button("HTML").clicked() {
+                        self.export("html");
+                    }
+                    if let Some(applied) = &self.applied
+                        && ui.button("Revert applied DNS").clicked()
+                    {
+                        self.confirm_revert = true;
+                        let _ = applied;
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Current DNS at run time: {} · Cloudflare edge: {}",
+                        if result.current_dns.is_empty() {
+                            "not detected".to_string()
+                        } else {
+                            format_ip_list(&result.current_dns)
+                        },
+                        result.data_center.as_deref().unwrap_or("not detected")
+                    ))
+                    .small()
+                    .weak(),
+                );
+            });
+    }
+
+    fn results_section(&mut self, ui: &mut egui::Ui, rows: &[Row], live: bool) {
+        let mut sorted = rows.to_vec();
+        sort_rows(&mut sorted, self.sort);
+        let query = self.result_filter.trim().to_lowercase();
+        if !query.is_empty() {
+            sorted.retain(|row| row_matches(row, &query));
+        }
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(if live { "Live results" } else { "All results" })
+                    .size(18.0)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new(format!("{} shown", sorted.len()))
+                    .small()
+                    .weak(),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("sort_results")
+                    .selected_text(self.sort.label())
+                    .width(142.0)
+                    .show_ui(ui, |ui| {
+                        for key in SortKey::ALL {
+                            ui.selectable_value(&mut self.sort, key, key.label());
+                        }
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.result_filter)
+                        .hint_text("Filter results")
+                        .desired_width(160.0),
+                );
+            });
+        });
+        if sorted.is_empty() {
+            ui.label(
+                RichText::new("No results match this filter yet.")
+                    .small()
+                    .weak()
+                    .italics(),
+            );
+            return;
+        }
+        let chosen = self.chosen_id.clone();
+        if let Some(id) = results_table(ui, &sorted, chosen.as_deref()) {
+            self.chosen_id = Some(id);
+        }
+        if !live {
+            ui.label(
+                RichText::new(
+                    "Click a result or Use to choose it. The recommendation above follows your choice.",
+                )
+                .small()
+                .weak(),
+            );
+        }
+    }
+
+    fn steering_section(&mut self, ui: &mut egui::Ui, result: &RunResult) {
+        if result.steerings.is_empty() {
+            return;
+        }
+        ui.add_space(14.0);
+        ui.label(RichText::new("Steering").size(18.0).strong());
+        ui.label(
+            RichText::new(
+                "Where hostnames resolve from the fastest plain-DNS servers, and whether the returned addresses are reachable.",
+            )
+            .small()
+            .weak(),
+        );
+        for steering in &result.steerings {
+            egui::CollapsingHeader::new(format!(
+                "{} — {} servers",
+                steering.host, steering.servers
+            ))
+            .id_salt(format!("steering:{}", steering.host))
+            .default_open(true)
+            .show(ui, |ui| {
+                steering_table(ui, steering);
+            });
+        }
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if let Some(notice) = &self.notice {
+                ui.label(RichText::new(&notice.text).small().color(if notice.error {
+                    RED
+                } else {
+                    GREEN
+                }));
+            } else if self.apply_running {
+                ui.spinner();
+                ui.label(
+                    RichText::new("Waiting for administrator permission…")
+                        .small()
+                        .weak(),
+                );
+            } else if self.revert_running {
+                ui.spinner();
+                ui.label(
+                    RichText::new("Restoring the previous DNS settings…")
+                        .small()
+                        .weak(),
+                );
+            } else if self.running {
+                ui.spinner();
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} / {}",
+                        self.stage.label(),
+                        self.progress.0,
+                        self.progress.1
+                    ))
+                    .small()
+                    .weak(),
+                );
+            } else if let Some(result) = &self.result {
+                ui.label(
+                    RichText::new(format!(
+                        "Finished · {} tested · {:.1} s",
+                        result.tested, result.duration_secs
+                    ))
+                    .small()
+                    .weak(),
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!(
+                        "Ready · {} servers available · {} selected",
+                        self.catalog.len(),
+                        self.selected_in_catalog()
+                    ))
+                    .small()
+                    .weak(),
+                );
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("{} · dnsrace {VERSION}", platform::platform_name()))
+                        .small()
+                        .weak(),
+                );
+            });
+        });
+    }
+
+    fn windows(&mut self, ctx: &egui::Context) {
+        self.settings_window(ctx);
+        self.custom_window(ctx);
+        self.history_window(ctx);
+        self.about_window(ctx);
+        self.confirm_apply_window(ctx);
+        self.confirm_revert_window(ctx);
+    }
+
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let mut settings = self.settings.clone();
+        let mut export_dir = self.export_dir_text.clone();
+        let mut save = false;
+        let mut reset = false;
+        let mut add_custom = false;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .default_width(520.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Benchmark").strong());
+                egui::Grid::new("settings_grid")
+                    .num_columns(2)
+                    .spacing([18.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Per-query timeout");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.timeout_ms)
+                                .range(100..=5000)
+                                .suffix(" ms"),
+                        );
+                        ui.end_row();
+                        ui.label("Parallel servers");
+                        ui.add(egui::DragValue::new(&mut settings.jobs).range(1..=32));
+                        ui.end_row();
+                        ui.label("Rounds");
+                        ui.add(egui::DragValue::new(&mut settings.repeat).range(1..=3));
+                        ui.end_row();
+                        ui.label("Steering connect port");
+                        ui.add(egui::DragValue::new(&mut settings.connect_port).range(1..=65535));
+                        ui.end_row();
+                    });
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut settings.include_system,
+                    "Include this machine's current DNS and router in plain tests",
+                );
+                ui.checkbox(
+                    &mut settings.include_nearby,
+                    "Add nearby-country open resolvers (downloads a country list when you start)",
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new("Steering hostnames").strong());
+                ui.label(
+                    RichText::new("One hostname per line, for example example.com.")
+                        .small()
+                        .weak(),
+                );
+                ui.add(
+                    egui::TextEdit::multiline(&mut settings.hostnames)
+                        .hint_text("example.com\ncloudflare.com")
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new("Exports").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Folder");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut export_dir)
+                            .hint_text("Leave empty for Downloads")
+                            .desired_width(340.0),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Appearance");
+                    egui::ComboBox::from_id_salt("theme")
+                        .selected_text(match settings.theme {
+                            Theme::Dark => "Dark",
+                            Theme::Light => "Light",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut settings.theme, Theme::Dark, "Dark");
+                            ui.selectable_value(&mut settings.theme, Theme::Light, "Light");
+                        });
+                });
+                ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Custom resolvers").strong());
+                    if ui.small_button("+ Add").clicked() {
+                        add_custom = true;
+                    }
+                });
+                if settings.custom.is_empty() {
+                    ui.label(RichText::new("No custom resolvers yet.").small().weak());
+                } else {
+                    let mut remove = None;
+                    for (index, custom) in settings.custom.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} · {}",
+                                    custom.name,
+                                    custom.protocol.label()
+                                ))
+                                .small(),
+                            );
+                            ui.label(RichText::new(&custom.endpoint).small().weak().monospace());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button("Remove").clicked() {
+                                    remove = Some(index);
+                                }
+                            });
+                        });
+                    }
+                    if let Some(index) = remove {
+                        settings.custom.remove(index);
+                    }
+                }
+                ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Save").strong())
+                                .fill(ACCENT)
+                                .min_size(Vec2::new(90.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                    if ui.button("Reset benchmark defaults").clicked() {
+                        reset = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Applying uses {} system settings.",
+                                platform::platform_name()
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
+                });
+            });
+        if reset {
+            let defaults = Settings::default();
+            settings.timeout_ms = defaults.timeout_ms;
+            settings.jobs = defaults.jobs;
+            settings.repeat = defaults.repeat;
+            settings.connect_port = defaults.connect_port;
+            settings.include_system = defaults.include_system;
+            settings.include_nearby = defaults.include_nearby;
+            settings.hostnames = defaults.hostnames.clone();
+            settings.export_dir = defaults.export_dir;
+            settings.theme = defaults.theme;
+            export_dir.clear();
+        }
+        if save {
+            self.settings.timeout_ms = settings.timeout_ms;
+            self.settings.jobs = settings.jobs;
+            self.settings.repeat = settings.repeat;
+            self.settings.connect_port = settings.connect_port;
+            self.settings.include_system = settings.include_system;
+            self.settings.include_nearby = settings.include_nearby;
+            self.settings.hostnames = settings.hostnames.clone();
+            self.settings.theme = settings.theme;
+            self.settings.custom = settings.custom.clone();
+            self.settings.export_dir = if export_dir.trim().is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(export_dir.trim()))
+            };
+            self.export_dir_text = export_dir;
+            self.save_settings();
+            self.rebuild_catalog();
+            self.notify("Settings saved.", false);
+            open = false;
+        }
+        if add_custom {
+            self.custom = CustomDraft::default();
+            self.show_custom = true;
+        }
+        self.show_settings = open;
+    }
+
+    fn custom_window(&mut self, ctx: &egui::Context) {
+        if !self.show_custom {
+            return;
+        }
+        let mut open = true;
+        let mut draft = self.custom.clone();
+        let mut add = false;
+        egui::Window::new("Add custom resolver")
+            .open(&mut open)
+            .default_width(500.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Custom resolvers are tested exactly like built-in servers. Plain, DoT and DoH endpoints are supported.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.name)
+                            .hint_text("Optional label")
+                            .desired_width(300.0),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Type");
+                    egui::ComboBox::from_id_salt("custom_protocol")
+                        .selected_text(draft.protocol.label())
+                        .show_ui(ui, |ui| {
+                            for protocol in Protocol::all() {
+                                ui.selectable_value(&mut draft.protocol, protocol, protocol.label());
+                            }
+                        });
+                });
+                match draft.protocol {
+                    Protocol::Udp | Protocol::Tcp => {
+                        ui.horizontal(|ui| {
+                            ui.label("Address");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut draft.endpoint)
+                                    .hint_text("1.1.1.1 or 1.1.1.1:5353")
+                                    .desired_width(330.0),
+                            );
+                        });
+                    }
+                    Protocol::Dot => {
+                        ui.horizontal(|ui| {
+                            ui.label("Hostname");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut draft.endpoint)
+                                    .hint_text("dns.example.com")
+                                    .desired_width(330.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("IP (optional)");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut draft.address)
+                                    .hint_text("1.2.3.4")
+                                    .desired_width(330.0),
+                            );
+                        });
+                    }
+                    Protocol::Doh => {
+                        ui.horizontal(|ui| {
+                            ui.label("DoH URL");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut draft.endpoint)
+                                    .hint_text("https://dns.example.com/dns-query")
+                                    .desired_width(330.0),
+                            );
+                        });
+                    }
+                }
+                if draft.protocol.is_plain() {
+                    ui.label(
+                        RichText::new(
+                            "Custom ports are useful for testing; the Apply button only accepts port 53.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                }
+                if let Some(error) = &draft.error {
+                    ui.label(RichText::new(error).small().color(RED));
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("Add resolver").strong())
+                            .fill(ACCENT)
+                            .min_size(Vec2::new(126.0, 30.0)),
+                    )
+                    .clicked()
+                {
+                    add = true;
+                }
+            });
+        self.custom = draft;
+        if add {
+            let name = self.custom.name.trim().to_string();
+            let endpoint = self.custom.endpoint.trim().to_string();
+            let candidate = match self.custom.protocol {
+                Protocol::Udp | Protocol::Tcp => providers::custom_plain(&name, &endpoint),
+                Protocol::Dot => {
+                    providers::custom_dot(&name, &endpoint, Some(self.custom.address.as_str()))
+                }
+                Protocol::Doh => providers::custom_doh(&name, &endpoint),
+            };
+            match candidate {
+                Ok(candidate) => {
+                    self.settings.custom.push(CustomResolver {
+                        name: if name.is_empty() {
+                            endpoint.clone()
+                        } else {
+                            name
+                        },
+                        protocol: self.custom.protocol,
+                        endpoint,
+                        address: if self.custom.address.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.custom.address.trim().to_string())
+                        },
+                    });
+                    self.settings.selected.insert(candidate.id.clone());
+                    self.save_settings();
+                    self.rebuild_catalog();
+                    self.notify(format!("Added {}.", candidate.display()), false);
+                    self.custom = CustomDraft::default();
+                    self.show_custom = false;
+                    return;
+                }
+                Err(error) => {
+                    self.custom.error = Some(error);
+                    open = true;
+                }
+            }
+        }
+        self.show_custom = open;
+    }
+
+    fn history_window(&mut self, ctx: &egui::Context) {
+        if !self.show_history {
+            return;
+        }
+        let mut open = true;
+        let entries = self.history.clone();
+        let mut load = None;
+        let mut clear = false;
+        let mut close = false;
+        egui::Window::new("History")
+            .open(&mut open)
+            .default_width(560.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "The last 20 runs are stored locally as JSON in the config folder.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(6.0);
+                if entries.is_empty() {
+                    ui.label(RichText::new("No runs saved yet.").weak().italics());
+                }
+                for (index, entry) in entries.iter().enumerate() {
+                    egui::Frame::new()
+                        .fill(ui.visuals().faint_bg_color)
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::same(10))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(entry.label()).strong());
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} results · {:.1} s · {}",
+                                            entry.rows.len(),
+                                            entry.duration_secs,
+                                            entry.family.label()
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    );
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.button("Open").clicked() {
+                                        load = Some(index);
+                                    }
+                                });
+                            });
+                        });
+                    ui.add_space(4.0);
+                }
+                ui.separator();
+                if ui.button("Clear history").clicked() {
+                    clear = true;
+                }
+            });
+        if clear {
+            match config::clear_history() {
+                Ok(()) => {
+                    self.history.clear();
+                    self.notify("History cleared.", false);
+                }
+                Err(error) => self.notify(format!("Could not clear history: {error}"), true),
+            }
+        }
+        if let Some(index) = load
+            && let Some(entry) = entries.get(index).cloned()
+        {
+            let count = entry.rows.len();
+            let result = RunResult {
+                protocol: entry.protocol,
+                family: entry.family,
+                duration_secs: entry.duration_secs,
+                data_center: entry.data_center,
+                current_dns: entry.current_dns,
+                rows: entry.rows,
+                steerings: entry.steerings,
+                scanned: count,
+                tested: count,
+            };
+            self.settings.protocol = result.protocol;
+            self.settings.family = result.family;
+            self.rebuild_catalog();
+            self.save_settings();
+            self.chosen_id = result.best().map(|row| row.id.clone());
+            self.live_rows = result.rows.clone();
+            self.stage = Stage::Done;
+            self.progress = (result.tested, result.tested);
+            self.result = Some(result);
+            close = true;
+            self.notify("Loaded a saved run.", false);
+        }
+        self.show_history = open && !close;
+    }
+
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new("About dnsrace")
+            .open(&mut open)
+            .default_width(480.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(RichText::new(format!("dnsrace {VERSION}")).size(22.0).strong());
+                ui.label(
+                    RichText::new(
+                        "A desktop tool for finding and applying the fastest DNS resolver for your connection.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new("Privacy").strong());
+                ui.label(
+                    "No telemetry. The only network requests are DNS probes, TLS/HTTPS connections to the resolvers being tested, and the optional nearby-country list.",
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new("Apply support").strong());
+                ui.label(
+                    "Linux: NetworkManager or systemd-resolved. Windows: PowerShell with UAC. macOS: networksetup with the administrator prompt.",
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new("Built with").strong());
+                ui.label("Rust, egui/eframe, rustls, tokio and ureq.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.hyperlink_to(
+                        "Project page",
+                        "https://github.com/Yousef-Mohamed22/dnsrace",
+                    );
+                    ui.label("·");
+                    ui.label("MIT licensed");
+                });
+                ui.add_space(8.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        self.show_about = open && !close;
+    }
+
+    fn confirm_apply_window(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_apply.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        let mut cancel = false;
+        egui::Window::new("Apply DNS settings?")
+            .open(&mut open)
+            .default_width(470.0)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label(RichText::new(&pending.label).strong());
+                ui.add_space(4.0);
+                ui.label("These DNS servers will be set on the active connection:");
+                for ip in &pending.addresses {
+                    ui.label(RichText::new(ip.to_string()).monospace().color(ACCENT));
+                }
+                if let Some(warning) = &pending.warning {
+                    ui.label(RichText::new(warning).small().color(YELLOW));
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "The previous settings are saved first, so you can use Revert. Your system may ask for administrator permission.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Apply").strong())
+                                .fill(ACCENT)
+                                .min_size(Vec2::new(90.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if apply {
+            self.pending_apply = None;
+            self.start_apply(pending.addresses.clone());
+        } else if cancel || !open {
+            self.pending_apply = None;
+        }
+    }
+
+    fn confirm_revert_window(&mut self, ctx: &egui::Context) {
+        if !self.confirm_revert {
+            return;
+        }
+        let applied = self.applied.clone();
+        let mut open = true;
+        let mut restore = false;
+        let mut cancel = false;
+        egui::Window::new("Restore previous DNS?")
+            .open(&mut open)
+            .default_width(460.0)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                if let Some(applied) = &applied {
+                    ui.label("dnsrace will restore the DNS settings saved when it applied:");
+                    ui.label(RichText::new(applied.summary()).small().weak());
+                } else {
+                    ui.label("No saved DNS change was found.");
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Your system may ask for administrator permission. If the saved settings are unavailable, the connection's automatic DNS is restored.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("Restore").strong())
+                                .fill(ACCENT)
+                                .min_size(Vec2::new(90.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        restore = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if restore {
+            self.confirm_revert = false;
+            self.start_revert();
+        } else {
+            self.confirm_revert = !(cancel || !open);
+        }
     }
 }
 
 impl eframe::App for DnsRaceGui {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_messages();
-        if self.running {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
+        self.approve_theme(ctx);
+        self.poll_events(ctx);
+        self.poll_apply(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.approve_theme(ui.ctx());
         let ctx = ui.ctx().clone();
+        let top_frame = egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(16, 10))
+            .stroke(Stroke::new(
+                1.0,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ));
+        egui::Panel::top("toolbar")
+            .resizable(false)
+            .frame(top_frame)
+            .show(ui, |ui| self.top_bar(ui));
+        let bottom_frame = egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(16, 4));
+        egui::Panel::bottom("status")
+            .resizable(false)
+            .exact_size(28.0)
+            .frame(bottom_frame)
+            .show(ui, |ui| self.status_bar(ui));
+        let side_frame = egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(14, 12));
+        egui::Panel::left("servers")
+            .resizable(true)
+            .default_size(356.0)
+            .size_range(300.0..=480.0)
+            .frame(side_frame)
+            .show(ui, |ui| self.sidebar(ui));
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(22, 12)),
+            )
+            .show(ui, |ui| self.main_panel(ui));
+        self.windows(&ctx);
+    }
+}
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("dnsrace");
-            ui.label("Race DNS servers from your connection and find the fastest one.");
-            ui.separator();
+impl Drop for DnsRaceGui {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
 
-            egui::Grid::new("settings").show(ui, |ui| {
-                ui.label("Hostnames (one per line, optional):");
-                ui.text_edit_multiline(&mut self.hosts);
-                ui.end_row();
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
 
-                ui.label("Timeout (ms):");
-                ui.text_edit_singleline(&mut self.timeout_ms);
-                ui.end_row();
+fn format_elapsed(started: Option<Instant>) -> String {
+    match started {
+        Some(started) => format!("{:.1} s", started.elapsed().as_secs_f32()),
+        None => String::new(),
+    }
+}
 
-                ui.label("Concurrent servers (jobs):");
-                ui.text_edit_singleline(&mut self.jobs);
-                ui.end_row();
+fn format_ip_list(ips: &[IpAddr]) -> String {
+    ips.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
-                ui.label("Repeat (1-5):");
-                ui.text_edit_singleline(&mut self.repeat);
-                ui.end_row();
+fn family_allows(candidate: &Candidate, family: Family) -> bool {
+    match &candidate.target {
+        servers::Target::Plain(addr) => family.allows(addr.ip()),
+        servers::Target::Dot { addr, .. } => match addr {
+            Some(addr) => family.allows(addr.ip()),
+            None => family == Family::Any,
+        },
+        servers::Target::Doh { .. } => true,
+    }
+}
 
-                ui.label("Address family:");
-                ui.radio_value(&mut self.family, Family::Any, "IPv4 + IPv6");
-                ui.radio_value(&mut self.family, Family::V4, "IPv4 only");
-                ui.radio_value(&mut self.family, Family::V6, "IPv6 only");
-                ui.end_row();
+fn custom_candidate(custom: &CustomResolver) -> Result<Candidate, String> {
+    match custom.protocol {
+        Protocol::Udp | Protocol::Tcp => providers::custom_plain(&custom.name, &custom.endpoint),
+        Protocol::Dot => {
+            providers::custom_dot(&custom.name, &custom.endpoint, custom.address.as_deref())
+        }
+        Protocol::Doh => providers::custom_doh(&custom.name, &custom.endpoint),
+    }
+}
 
-                ui.label("Query over TCP:");
-                ui.checkbox(&mut self.tcp, "Use TCP instead of UDP");
-                ui.end_row();
+fn matches_filter(candidate: &Candidate, query: &str) -> bool {
+    candidate.provider.to_lowercase().contains(query)
+        || candidate.label.to_lowercase().contains(query)
+        || candidate.endpoint().to_lowercase().contains(query)
+        || candidate.category.label().to_lowercase().contains(query)
+}
 
-                ui.label("DNS-over-HTTPS:");
-                ui.checkbox(&mut self.doh, "Include Cloudflare and Google DoH");
-                ui.end_row();
+fn row_matches(row: &Row, query: &str) -> bool {
+    row.provider.to_lowercase().contains(query)
+        || row.label.to_lowercase().contains(query)
+        || row.endpoint.to_lowercase().contains(query)
+        || row.security_status().label().to_lowercase().contains(query)
+        || row.note.label().to_lowercase().contains(query)
+}
 
-                ui.label("Detect system DNS/router:");
-                ui.checkbox(&mut self.detect, "Auto-detect router and current DNS");
-                ui.end_row();
+fn sort_rows(rows: &mut [Row], sort: SortKey) {
+    match sort {
+        SortKey::Score => rows.sort_by(|a, b| a.score.total_cmp(&b.score)),
+        SortKey::Cached => rows.sort_by(|a, b| {
+            a.cached
+                .unwrap_or(f64::INFINITY)
+                .total_cmp(&b.cached.unwrap_or(f64::INFINITY))
+        }),
+        SortKey::Uncached => rows.sort_by(|a, b| {
+            a.uncached
+                .unwrap_or(f64::INFINITY)
+                .total_cmp(&b.uncached.unwrap_or(f64::INFINITY))
+        }),
+        SortKey::Provider => rows.sort_by(|a, b| {
+            a.provider
+                .to_lowercase()
+                .cmp(&b.provider.to_lowercase())
+                .then_with(|| a.label.cmp(&b.label))
+        }),
+        SortKey::Security => rows.sort_by_key(|row| match row.security_status() {
+            SecurityStatus::Validated => 0,
+            SecurityStatus::Partial => 1,
+            SecurityStatus::Insecure => 2,
+            SecurityStatus::Unknown => 3,
+            SecurityStatus::BogusAccepted => 4,
+        }),
+    }
+}
 
-                ui.label("Test nearby resolvers:");
-                ui.checkbox(&mut self.nearby, "Also test resolvers for your country");
-                ui.end_row();
+fn security_color(status: SecurityStatus) -> Color32 {
+    match status {
+        SecurityStatus::Validated => GREEN,
+        SecurityStatus::Insecure | SecurityStatus::Partial | SecurityStatus::Unknown => YELLOW,
+        SecurityStatus::BogusAccepted => RED,
+    }
+}
 
-                ui.label("Verbose:");
-                ui.checkbox(&mut self.verbose, "Show spread and DNSSEC details");
-                ui.end_row();
+fn category_color(category: Category) -> Color32 {
+    match category {
+        Category::General => Color32::from_rgb(130, 170, 220),
+        Category::Security => GREEN,
+        Category::Family => YELLOW,
+        Category::Privacy => Color32::from_rgb(185, 140, 255),
+        Category::Uncensored => Color32::from_rgb(110, 205, 220),
+        Category::System => YELLOW,
+        Category::Custom => Color32::from_rgb(185, 140, 255),
+    }
+}
 
-                ui.label("Output format:");
-                ui.radio_value(&mut self.format, OutputFormat::Table, "Table");
-                ui.radio_value(&mut self.format, OutputFormat::Json, "JSON");
-                ui.radio_value(&mut self.format, OutputFormat::Csv, "CSV");
-                ui.radio_value(
-                    &mut self.format,
-                    OutputFormat::Quiet,
-                    "Quiet (address only)",
-                );
-                ui.end_row();
-            });
+fn tag(ui: &mut egui::Ui, text: &str, color: Color32) {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.16))
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(5, 1))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(9.0).strong().color(color));
+        });
+}
 
-            ui.separator();
+fn card_frame(ui: &egui::Ui) -> egui::Frame {
+    let visuals = ui.visuals();
+    let fill = if visuals.dark_mode {
+        Color32::from_rgb(23, 28, 36)
+    } else {
+        Color32::from_rgb(255, 255, 255)
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(
+            1.0,
+            visuals.widgets.noninteractive.bg_stroke.color,
+        ))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::same(14))
+}
 
-            let run_enabled = !self.running;
-            if ui
-                .add_enabled(run_enabled, egui::Button::new("Run Benchmark"))
-                .clicked()
-            {
-                self.start_benchmark();
-            }
+fn apply_warning(row: &Row) -> Option<String> {
+    if row.security_status() == SecurityStatus::BogusAccepted {
+        return Some(
+            "This resolver accepted a deliberately bogus DNSSEC signature. Do not apply it as a system resolver."
+                .to_string(),
+        );
+    }
+    if !row.healthy() {
+        return Some(
+            "This resolver did not pass all health checks. Applying it is possible, but not recommended."
+                .to_string(),
+        );
+    }
+    None
+}
 
-            if self.running {
-                if let Some((done, total, elapsed)) = self.progress {
-                    let pct = done.saturating_mul(100) / total.max(1);
-                    let fraction = pct as f32 / 100.0_f32;
-                    ui.add(egui::ProgressBar::new(fraction).text(format!(
-                        "Testing {done}/{total} servers ({pct}%) - {elapsed:.1}s"
-                    )));
-                } else {
-                    ui.spinner();
-                    ui.label("Starting benchmark...");
+fn results_table(ui: &mut egui::Ui, rows: &[Row], chosen: Option<&str>) -> Option<String> {
+    let mut choice = None;
+    ui.push_id("results_table", |ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let full = ui.available_width() >= 760.0;
+        let mut table = TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .sense(egui::Sense::click())
+            .cell_layout(Layout::left_to_right(Align::Center))
+            .column(Column::exact(30.0))
+            .column(Column::initial(120.0).at_least(100.0).clip(true))
+            .column(Column::remainder().at_least(120.0).clip(true));
+        if full {
+            table = table
+                .column(Column::exact(38.0))
+                .column(Column::exact(58.0))
+                .column(Column::exact(66.0));
+        }
+        table
+            .column(Column::exact(54.0))
+            .column(Column::exact(90.0))
+            .column(Column::exact(82.0))
+            .column(Column::exact(48.0))
+            .max_scroll_height(420.0)
+            .header(24.0, |mut header| {
+                let mut labels = vec!["#", "Provider", "Server"];
+                if full {
+                    labels.extend_from_slice(&["Type", "Cached", "Uncached"]);
                 }
-            }
-
-            if self.error.is_some() {
-                let err = self.error.clone().unwrap();
-                ui.separator();
-                egui::Window::new("Error")
-                    .collapsible(false)
-                    .resizable(false)
-                    .show(&ctx, |ui| {
-                        ui.colored_label(egui::Color32::RED, &err);
-                        if ui.button("Dismiss").clicked() {
-                            self.error = None;
+                labels.extend_from_slice(&["Score", "DNSSEC", "Status", "Use"]);
+                for label in labels {
+                    header.col(|ui| {
+                        ui.label(RichText::new(label).size(10.0).strong().weak());
+                    });
+                }
+            })
+            .body(|mut body| {
+                for (index, row) in rows.iter().enumerate() {
+                    body.row(28.0, |mut table_row| {
+                        let selected = chosen == Some(row.id.as_str());
+                        table_row.set_selected(selected);
+                        table_row.col(|ui| {
+                            if ui
+                                .selectable_label(selected, format!("{}", index + 1))
+                                .clicked()
+                            {
+                                choice = Some(row.id.clone());
+                            }
+                        });
+                        table_row.col(|ui| {
+                            ui.label(RichText::new(&row.provider).strong())
+                                .on_hover_text(format!(
+                                    "{}\n{}\nCached {} · Uncached {}",
+                                    row.label,
+                                    row.endpoint,
+                                    report::fmt_ms(row.cached),
+                                    report::fmt_ms(row.uncached)
+                                ));
+                        });
+                        table_row.col(|ui| {
+                            ui.label(RichText::new(&row.endpoint).monospace().size(12.0))
+                                .on_hover_text(format!(
+                                    "{}\n{}\nCached {} · Uncached {}",
+                                    row.label,
+                                    if row.note == Note::Ok {
+                                        "No health flags."
+                                    } else {
+                                        row.note.label()
+                                    },
+                                    report::fmt_ms(row.cached),
+                                    report::fmt_ms(row.uncached)
+                                ));
+                        });
+                        if full {
+                            table_row.col(|ui| {
+                                ui.label(RichText::new(row.transport.label()).small());
+                            });
+                            table_row.col(|ui| {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(report::fmt_ms(row.cached))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                            });
+                            table_row.col(|ui| {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(report::fmt_ms(row.uncached))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                            });
+                        }
+                        table_row.col(|ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(format!("{:.1}", row.score))
+                                        .small()
+                                        .strong()
+                                        .color(ACCENT)
+                                        .monospace(),
+                                );
+                            });
+                        });
+                        table_row.col(|ui| {
+                            let status = row.security_status();
+                            ui.label(
+                                RichText::new(status.short())
+                                    .small()
+                                    .color(security_color(status)),
+                            );
+                        });
+                        table_row.col(|ui| {
+                            if row.note != Note::Ok {
+                                ui.label(RichText::new(row.note.label()).small().color(RED));
+                            } else if row.healthy() {
+                                ui.label(RichText::new("OK").small().color(GREEN));
+                            } else {
+                                ui.label(RichText::new("Check").small().color(YELLOW));
+                            }
+                        });
+                        table_row.col(|ui| {
+                            if ui.small_button("Use").clicked() {
+                                choice = Some(row.id.clone());
+                            }
+                        });
+                        if table_row.response().clicked() {
+                            choice = Some(row.id.clone());
                         }
                     });
-            }
+                }
+            });
+    });
+    choice
+}
 
-            if let Some(text) = &self.result {
-                ui.separator();
-                if self.exit_code == 0 {
-                    ui.label("Results:");
-                } else {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        format!(
-                            "Benchmark did not finish successfully (exit code {}).",
-                            self.exit_code
-                        ),
-                    );
-                }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.monospace(text);
-                });
-                ui.separator();
-                if ui.button("Copy to clipboard").clicked() {
-                    ctx.copy_text(text.clone());
-                }
+fn median_connect(entry: &crate::bench::SteerEntry) -> Option<f64> {
+    let mut values: Vec<f64> = entry.connects.iter().flatten().copied().collect();
+    crate::util::median(&mut values)
+}
+
+fn steering_table(ui: &mut egui::Ui, steering: &Steering) {
+    if steering.entries.is_empty() {
+        ui.label(
+            RichText::new("No addresses were returned by the tested servers.")
+                .small()
+                .weak(),
+        );
+        return;
+    }
+    egui::Grid::new(format!("steering_grid:{}", steering.host))
+        .num_columns(4)
+        .spacing([18.0, 4.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label(RichText::new("Address").small().strong().weak());
+            ui.label(RichText::new("Returned by").small().strong().weak());
+            ui.label(RichText::new("Median connect").small().strong().weak());
+            ui.label(RichText::new("Attempts").small().strong().weak());
+            ui.end_row();
+            for entry in &steering.entries {
+                ui.label(RichText::new(entry.ip.to_string()).monospace().small());
+                ui.label(
+                    RichText::new(format!("{} / {}", entry.returned_by, steering.servers)).small(),
+                );
+                ui.label(
+                    RichText::new(report::fmt_ms(median_connect(entry)))
+                        .small()
+                        .monospace(),
+                );
+                ui.label(
+                    RichText::new(
+                        entry
+                            .connects
+                            .iter()
+                            .map(|value| {
+                                value
+                                    .map(|ms| format!("{ms:.1}"))
+                                    .unwrap_or_else(|| "fail".into())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    )
+                    .small()
+                    .weak()
+                    .monospace(),
+                );
+                ui.end_row();
             }
         });
-    }
 }
 
-/// Runs the benchmark logic for the GUI, reporting progress via a callback.
-async fn run_gui_benchmark<F>(cfg: Config, mut on_progress: F) -> (String, u8)
-where
-    F: FnMut(usize, usize, f64) + Send + 'static,
-{
-    use std::collections::HashSet;
-    use std::time::Instant;
-
-    use tokio::task::JoinSet;
-
-    use crate::bench;
-    use crate::cli::OutputFormat;
-    use crate::servers::{self, CURRENT, CUSTOM, OTHER, Pool, ROUTER};
-    use crate::system;
-    use crate::util;
-
-    fn failed(message: impl Into<String>) -> (String, u8) {
-        (message.into(), 1)
-    }
-
-    let started = Instant::now();
-    util::seed_rng();
-
-    let list_text = match &cfg.servers_file {
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) => {
-                return failed(format!(
-                    "Could not read the server list {}: {e}",
-                    path.display()
-                ));
-            }
-        },
-        None => servers::BUILTIN.to_string(),
-    };
-    let listed = servers::parse_servers(&list_text);
-
-    let data_center = if cfg.detect {
-        bench::cloudflare_data_center().await
-    } else {
-        None
-    };
-    let sys = tokio::task::spawn_blocking(system::detect)
-        .await
-        .unwrap_or_default();
-    let nearby_cc = if cfg.nearby {
-        tokio::task::spawn_blocking(servers::fetch_country_code)
-            .await
-            .unwrap_or(None)
-    } else {
-        None
-    };
-
-    let mut countries = cfg.countries.clone();
-    if let Some(cc) = &nearby_cc
-        && !countries.contains(cc)
-    {
-        countries.push(cc.clone());
-    }
-    countries.sort();
-    countries.dedup();
-
-    let mut lists = Vec::new();
-    if !countries.is_empty() {
-        let mut set = JoinSet::new();
-        for cc in countries {
-            let cc = cc.clone();
-            set.spawn_blocking(move || {
-                let result = servers::fetch_country(&cc);
-                (cc, result)
-            });
-        }
-        while let Some(res) = set.join_next().await {
-            if let Ok(item) = res {
-                lists.push(item);
-            }
-        }
-        lists.sort_by(|a, b| a.0.cmp(&b.0));
-    }
-
-    let family_allows = |addr: SocketAddr| match cfg.family {
-        cli::Family::Any => true,
-        cli::Family::V4 => addr.is_ipv4(),
-        cli::Family::V6 => addr.is_ipv6(),
-    };
-
-    let mut pool = Pool::default();
-    for c in &listed {
-        if family_allows(c.addr) {
-            pool.add(c.addr, &c.name);
-        }
-    }
-    let current_ips: Vec<std::net::IpAddr> = sys
-        .dns
-        .iter()
-        .copied()
-        .filter(|ip| family_allows(SocketAddr::new(*ip, 53)))
-        .collect();
-    if let Some(gateway) = sys.gateway
-        && family_allows(SocketAddr::new(gateway, 53))
-    {
-        pool.add(SocketAddr::new(gateway, 53), ROUTER);
-    }
-    for &ip in &current_ips {
-        pool.add(SocketAddr::new(ip, 53), CURRENT);
-    }
-    for &addr in &cfg.add {
-        if family_allows(addr) {
-            pool.add(addr, CUSTOM);
-        }
-    }
-
-    for (_cc, result) in lists {
-        if let Ok(ips) = result {
-            for ip in ips {
-                let addr = SocketAddr::new(ip, 53);
-                if family_allows(addr) {
-                    pool.add(addr, OTHER);
-                }
-            }
-        }
-    }
-
-    if cfg.doh {
-        for provider in crate::dns::DohProvider::all() {
-            pool.push_raw(crate::servers::Candidate {
-                addr: SocketAddr::from(([0, 0, 0, 0], 53)),
-                name: format!("{} (DoH)", provider.name()),
-                doh_provider: Some(provider),
-            });
-        }
-    }
-
-    if pool.is_empty() {
-        return failed(
-            "No servers to test. The server list is empty or every server was filtered out by the address-family setting.",
-        );
-    }
-
-    let scan_wait = cfg.timeout.min(Duration::from_secs(3));
-    let scan = bench::quick_scan(pool.items(), scan_wait, cfg.tcp).await;
-    if scan.is_empty() {
-        return failed(
-            "No server answered the quick scan. Check your connection and whether UDP/TCP port 53 is blocked by a firewall or VPN.",
-        );
-    }
-    on_progress(scan.len(), scan.len(), started.elapsed().as_secs_f64());
-
-    let short = bench::shortlist(&scan, cfg.known, cfg.other, &current_ips);
-    if short.servers.is_empty() {
-        return failed(
-            "No servers were selected for the full test. Check --known/--other or your server list.",
-        );
-    }
-
-    let stage2_started = Instant::now();
-    let rows = bench::full_tests(
-        short.servers,
-        cfg.jobs,
-        cfg.timeout,
-        cfg.repeat,
-        cfg.tcp,
-        |done, total| {
-            on_progress(done, total, stage2_started.elapsed().as_secs_f64());
-        },
-    )
-    .await;
-
-    let steerings =
-        if cfg.host.is_empty() || !matches!(cfg.format, OutputFormat::Table | OutputFormat::Json) {
-            Vec::new()
-        } else {
-            let want_v6 = matches!(cfg.family, cli::Family::Any | cli::Family::V6);
-            bench::steerings(&cfg.host, &rows, cfg.connect_port, want_v6).await
-        };
-
-    let current: HashSet<std::net::IpAddr> = current_ips.iter().copied().collect();
-    let json_output = report::json(
-        env!("CARGO_PKG_VERSION"),
-        data_center.as_deref(),
-        &rows,
-        &current,
-        &steerings,
-    );
-    let csv_output = report::csv(&rows, &current);
-
-    let mut out = String::new();
-    match cfg.format {
-        OutputFormat::Json => out.push_str(&json_output),
-        OutputFormat::Csv => out.push_str(&csv_output),
-        OutputFormat::Quiet => match report::recommended(&rows) {
-            Some(r) => out.push_str(&crate::servers::fmt_addr(r.addr)),
-            None => {
-                return failed(
-                    "No healthy server to recommend. Try again, raise the timeout, or use --repeat.",
-                );
-            }
-        },
-        OutputFormat::Table => {
-            out.push_str(&report::table(&rows, &current, false));
-            out.push('\n');
-            out.push_str(&report::summary(&rows, &current, false, cfg.repeat));
-            if cfg.verbose {
-                out.push('\n');
-                out.push_str(&report::details(&rows));
-            }
-            for steering in &steerings {
-                out.push('\n');
-                out.push_str(&report::steering_text(steering));
-            }
-            out.push_str(&format!(
-                "\n\nDone in {:.1}s.",
-                started.elapsed().as_secs_f64()
-            ));
-        }
-    }
-
-    (out, 0)
+/// The selected set is kept in `Settings`; these helpers are used by tests and the header.
+pub fn selected_ids(settings: &Settings) -> &BTreeSet<String> {
+    &settings.selected
 }
 
-/// Entry point for the GUI binary.
-pub async fn run_gui(_cfg: Config) -> u8 {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 760.0])
-            .with_min_inner_size([700.0, 480.0]),
-        ..Default::default()
-    };
-    match eframe::run_native(
-        "dnsrace",
-        options,
-        Box::new(|_cc| Ok(Box::new(DnsRaceGui::new()))),
-    ) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("dnsrace: could not start the graphical interface: {e}");
-            1
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bench::Note;
+
+    fn row(provider: &str, score: f64, security: Option<bool>) -> Row {
+        Row {
+            id: format!("{provider}:{score}"),
+            provider: provider.to_string(),
+            label: provider.to_string(),
+            transport: Protocol::Udp,
+            addr: Some("1.1.1.1:53".parse().unwrap()),
+            endpoint: "1.1.1.1".into(),
+            cached: Some(score),
+            uncached: Some(score + 1.0),
+            cached_min: Some(score),
+            cached_p95: Some(score + 2.0),
+            cached_p99: Some(score + 3.0),
+            cached_mean: Some(score + 1.0),
+            cached_max: Some(score + 4.0),
+            cached_jitter: Some(1.0),
+            dnssec: security,
+            dnssec_bogus: Some(true),
+            timeouts: 0,
+            note: Note::Ok,
+            score,
         }
+    }
+
+    #[test]
+    fn sort_orders_fastest_first() {
+        let mut rows = vec![row("slow", 30.0, Some(true)), row("fast", 10.0, Some(true))];
+        sort_rows(&mut rows, SortKey::Score);
+        assert_eq!(rows[0].provider, "fast");
+    }
+
+    #[test]
+    fn filters_match_provider_and_security() {
+        let row = row("Cloudflare", 10.0, Some(true));
+        assert!(row_matches(&row, "cloud"));
+        assert!(row_matches(&row, "dnssec"));
+        assert!(!row_matches(&row, "quad9"));
+    }
+
+    #[test]
+    fn category_and_security_colors_are_distinct() {
+        assert_ne!(security_color(SecurityStatus::Validated), RED);
+        assert_eq!(security_color(SecurityStatus::BogusAccepted), RED);
+        assert_ne!(
+            category_color(Category::Security),
+            category_color(Category::Family)
+        );
     }
 }

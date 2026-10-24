@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=dnsrace
+GenericName=DNS Benchmark
+Comment=Find and apply the fastest DNS resolver for your connection
+Exec=dnsrace
+TryExec=dnsrace
+Icon=io.github.yousef_mohamed22.dnsrace
+Terminal=false
+Categories=Network;
+Keywords=DNS;resolver;latency;benchmark;privacy;security;
+StartupNotify=true
+StartupWMClass=dnsrace

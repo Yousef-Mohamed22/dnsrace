@@ -75,13 +75,19 @@ pub fn detect() -> SystemInfo {
 /// Runs a command and returns its output, or `None` if it is missing, fails or takes longer
 /// than three seconds.
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
-    let mut child = Command::new(cmd)
+    let mut command = Command::new(cmd);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
     // drain the pipe on a thread so a chatty command can never block on a full pipe
     let reader = std::thread::spawn(move || {

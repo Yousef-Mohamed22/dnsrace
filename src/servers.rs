@@ -1,10 +1,12 @@
-//! The candidate servers: the built-in list, user lists, and the public-dns.info country lists.
+//! The candidate servers and the public resolver list.
+//!
+//! A candidate is more than an IP address now: dnsrace can measure plain DNS (UDP or TCP),
+//! DNS-over-TLS and DNS-over-HTTPS. The metadata (provider, category, notes) is carried along
+//! so the interface can group and explain the list without a second lookup table.
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
-
-use crate::dns::DohProvider;
 
 /// The default list is compiled into the binary (see servers.txt).
 pub const BUILTIN: &str = include_str!("../servers.txt");
@@ -13,50 +15,360 @@ pub const BUILTIN: &str = include_str!("../servers.txt");
 pub const OTHER: &str = "other";
 /// Label for DNS servers your system uses that are not in the server list.
 pub const CURRENT: &str = "current";
-/// Label for servers added with `--add` (or lines without a name).
+/// Label for servers added by the user.
 pub const CUSTOM: &str = "custom";
 /// Label for your default gateway, which normally forwards to your ISP's DNS.
 pub const ROUTER: &str = "Router/ISP-default";
 
-/// One server to test.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Candidate {
-    pub addr: SocketAddr,
-    pub name: String,
-    /// When set, this candidate is a DNS-over-HTTPS provider and is queried over HTTPS instead
-    /// of UDP/TCP port 53. The `addr` field is unused for DoH candidates.
-    pub doh_provider: Option<DohProvider>,
+/// A rough category used for filtering and for the badge shown in the interface.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum Category {
+    #[default]
+    General,
+    Security,
+    Family,
+    Privacy,
+    Uncensored,
+    System,
+    Custom,
 }
 
-/// The candidates, without duplicates (the first label for an address wins).
+impl Category {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Category::General => "General",
+            Category::Security => "Security",
+            Category::Family => "Family",
+            Category::Privacy => "Privacy",
+            Category::Uncensored => "Uncensored",
+            Category::System => "System",
+            Category::Custom => "Custom",
+        }
+    }
+}
+
+/// Which transport a run uses for plain IP addresses. DoT and DoH have their own endpoints.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum Protocol {
+    #[default]
+    Udp,
+    Tcp,
+    Dot,
+    Doh,
+}
+
+impl Protocol {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Protocol::Udp => "UDP",
+            Protocol::Tcp => "TCP",
+            Protocol::Dot => "DoT",
+            Protocol::Doh => "DoH",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Protocol::Udp => "Standard DNS on port 53, the default",
+            Protocol::Tcp => "DNS over TCP, for networks that block UDP port 53",
+            Protocol::Dot => "Encrypted DNS over TLS on port 853",
+            Protocol::Doh => "Encrypted DNS over HTTPS (RFC 8484)",
+        }
+    }
+
+    pub const fn is_plain(self) -> bool {
+        matches!(self, Protocol::Udp | Protocol::Tcp)
+    }
+
+    pub const fn is_encrypted(self) -> bool {
+        matches!(self, Protocol::Dot | Protocol::Doh)
+    }
+
+    pub const fn all() -> [Protocol; 4] {
+        [Protocol::Udp, Protocol::Tcp, Protocol::Dot, Protocol::Doh]
+    }
+}
+
+/// Which address family to test.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Family {
+    #[default]
+    Any,
+    V4,
+    V6,
+}
+
+impl Family {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Family::Any => "IPv4 + IPv6",
+            Family::V4 => "IPv4",
+            Family::V6 => "IPv6",
+        }
+    }
+
+    pub fn allows(self, ip: IpAddr) -> bool {
+        match self {
+            Family::Any => true,
+            Family::V4 => ip.is_ipv4(),
+            Family::V6 => ip.is_ipv6(),
+        }
+    }
+
+    pub fn allows_addr(self, addr: SocketAddr) -> bool {
+        self.allows(addr.ip())
+    }
+}
+
+/// How a candidate is queried. Plain candidates are queried with the protocol selected in the
+/// interface (UDP or TCP); dot/doh candidates carry their own transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Plain,
+    Dot,
+    Doh,
+}
+
+/// Where a candidate points.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A normal DNS server on port 53 (or a custom port).
+    Plain(SocketAddr),
+    /// DNS-over-TLS. `addr` is optional for a custom hostname; it is resolved at test time.
+    Dot {
+        addr: Option<SocketAddr>,
+        host: String,
+        port: u16,
+    },
+    /// DNS-over-HTTPS (RFC 8484 wire format).
+    Doh { url: String },
+}
+
+impl Target {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Target::Plain(_) => Kind::Plain,
+            Target::Dot { .. } => Kind::Dot,
+            Target::Doh { .. } => Kind::Doh,
+        }
+    }
+
+    pub fn endpoint(&self) -> String {
+        match self {
+            Target::Plain(addr) => fmt_addr(*addr),
+            Target::Dot { addr, host, port } => {
+                let suffix = if *port == 853 {
+                    String::new()
+                } else {
+                    format!(":{port}")
+                };
+                match addr {
+                    Some(addr) if addr.ip().to_string() != *host => {
+                        format!("{host}{suffix} ({})", addr.ip())
+                    }
+                    _ => format!("{host}{suffix}"),
+                }
+            }
+            Target::Doh { url } => url.clone(),
+        }
+    }
+
+    pub fn plain_addr(&self) -> Option<SocketAddr> {
+        match self {
+            Target::Plain(addr) => Some(*addr),
+            _ => None,
+        }
+    }
+}
+
+/// One server or encrypted resolver to test.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    /// Stable identifier used to remember selections between launches.
+    pub id: String,
+    /// The provider group, for example `Cloudflare` or `Quad9`.
+    pub provider: String,
+    /// The label shown in the list, for example `Cloudflare (malware)`.
+    pub label: String,
+    pub target: Target,
+    pub category: Category,
+    /// A short explanation of what the provider filters or promises.
+    pub note: String,
+    pub website: String,
+    /// A server dnsrace found on this machine rather than in the built-in list.
+    pub is_system: bool,
+    /// A server the user added.
+    pub is_custom: bool,
+}
+
+impl Candidate {
+    pub fn plain(addr: SocketAddr, provider: impl Into<String>, label: impl Into<String>) -> Self {
+        let provider = provider.into();
+        let label = label.into();
+        Candidate {
+            id: format!("plain:{addr}"),
+            provider,
+            label,
+            target: Target::Plain(addr),
+            category: Category::General,
+            note: String::new(),
+            website: String::new(),
+            is_system: false,
+            is_custom: false,
+        }
+    }
+
+    pub fn dot(
+        addr: Option<SocketAddr>,
+        host: impl Into<String>,
+        port: u16,
+        provider: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        let host = host.into();
+        let addr_part = addr
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "resolve".to_string());
+        Candidate {
+            id: format!("dot:{host}:{port}:{addr_part}"),
+            provider: provider.into(),
+            label: label.into(),
+            target: Target::Dot { addr, host, port },
+            category: Category::General,
+            note: String::new(),
+            website: String::new(),
+            is_system: false,
+            is_custom: false,
+        }
+    }
+
+    pub fn doh(
+        url: impl Into<String>,
+        provider: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Self {
+        let url = url.into();
+        Candidate {
+            id: format!("doh:{url}"),
+            provider: provider.into(),
+            label: label.into(),
+            target: Target::Doh { url },
+            category: Category::General,
+            note: String::new(),
+            website: String::new(),
+            is_system: false,
+            is_custom: false,
+        }
+    }
+
+    pub fn with_category(mut self, category: Category) -> Self {
+        self.category = category;
+        self
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = note.into();
+        self
+    }
+
+    pub fn with_website(mut self, website: impl Into<String>) -> Self {
+        self.website = website.into();
+        self
+    }
+
+    pub fn system(addr: SocketAddr, provider: impl Into<String>, label: impl Into<String>) -> Self {
+        let provider = provider.into();
+        let label = label.into();
+        Candidate {
+            id: format!("system:{addr}:{provider}"),
+            provider,
+            label,
+            target: Target::Plain(addr),
+            category: Category::System,
+            note: "Found on this machine".to_string(),
+            website: String::new(),
+            is_system: true,
+            is_custom: false,
+        }
+    }
+
+    pub fn as_system(mut self) -> Self {
+        self.is_system = true;
+        self
+    }
+
+    pub fn as_custom(mut self) -> Self {
+        self.is_custom = true;
+        self
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.target.kind()
+    }
+
+    pub fn endpoint(&self) -> String {
+        self.target.endpoint()
+    }
+
+    pub fn plain_addr(&self) -> Option<SocketAddr> {
+        self.target.plain_addr()
+    }
+
+    pub fn display(&self) -> String {
+        if self.label.is_empty() || self.label == self.provider {
+            self.endpoint()
+        } else {
+            format!("{} — {}", self.label, self.endpoint())
+        }
+    }
+}
+
+/// Candidates without duplicates (the first label for an id wins).
 #[derive(Default)]
 pub struct Pool {
     items: Vec<Candidate>,
-    seen: HashSet<SocketAddr>,
+    seen: HashSet<String>,
 }
 
 impl Pool {
-    /// Adds a server unless it is already in the pool. Returns whether it was added.
-    pub fn add(&mut self, addr: SocketAddr, name: &str) -> bool {
-        if !self.seen.insert(addr) {
+    /// Adds a candidate unless one with the same id is already present.
+    pub fn add(&mut self, candidate: Candidate) -> bool {
+        if !self.seen.insert(candidate.id.clone()) {
             return false;
         }
-        self.items.push(Candidate {
-            addr,
-            name: name.to_string(),
-            doh_provider: None,
-        });
+        self.items.push(candidate);
         true
-    }
-
-    /// Pushes a candidate without dedup checking (used for DoH providers that share a dummy
-    /// address).
-    pub fn push_raw(&mut self, c: Candidate) {
-        self.items.push(c);
     }
 
     pub fn items(&self) -> &[Candidate] {
         &self.items
+    }
+
+    pub fn into_items(self) -> Vec<Candidate> {
+        self.items
     }
 
     pub fn len(&self) -> usize {
@@ -88,11 +400,7 @@ pub fn parse_servers(text: &str) -> Vec<Candidate> {
             let mut parts = line.split_whitespace();
             let addr = parse_addr(parts.next()?)?;
             let name = parts.next().unwrap_or(CUSTOM).to_string();
-            Some(Candidate {
-                addr,
-                name,
-                doh_provider: None,
-            })
+            Some(Candidate::plain(addr, name.clone(), name))
         })
         .collect()
 }
@@ -135,8 +443,9 @@ pub fn is_usable_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// The two-letter country code Cloudflare associates with this connection, used by `--nearby`.
-/// Best effort: `None` when the network blocks the request or the answer is unexpected.
+/// The two-letter country code Cloudflare associates with this connection, used by the
+/// "nearby resolvers" option. Best effort: `None` when the network blocks the request or the
+/// answer is unexpected.
 pub fn fetch_country_code() -> Option<String> {
     let body = ureq::get("https://1.1.1.1/cdn-cgi/trace")
         .set("User-Agent", concat!("dnsrace/", env!("CARGO_PKG_VERSION")))
@@ -210,11 +519,14 @@ mod tests {
         let list = "# comment\n\n1.1.1.1 Cloudflare\n 8.8.8.8   Google  \nnot-an-ip Foo\n9.9.9.9\n[::1]:5300 Local\r\n";
         let s = parse_servers(list);
         assert_eq!(s.len(), 4);
-        assert_eq!(s[0].name, "Cloudflare");
-        assert_eq!(s[1].addr.ip(), IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
-        assert_eq!(s[2].name, CUSTOM);
-        assert_eq!(s[3].addr.port(), 5300);
-        assert_eq!(s[3].name, "Local");
+        assert_eq!(s[0].provider, "Cloudflare");
+        assert_eq!(
+            s[1].target.plain_addr().unwrap().ip(),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))
+        );
+        assert_eq!(s[2].provider, CUSTOM);
+        assert_eq!(s[3].target.plain_addr().unwrap().port(), 5300);
+        assert_eq!(s[3].provider, "Local");
     }
 
     #[test]
@@ -226,24 +538,29 @@ mod tests {
             .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
             .count();
         assert_eq!(parsed.len(), lines, "every line of servers.txt must parse");
-        let unique: HashSet<_> = parsed.iter().map(|c| c.addr).collect();
+        let unique: HashSet<_> = parsed.iter().filter_map(Candidate::plain_addr).collect();
         assert_eq!(
             unique.len(),
             parsed.len(),
             "duplicate addresses in servers.txt"
         );
-        assert!(parsed.iter().any(|c| c.addr.is_ipv4()));
-        assert!(parsed.iter().any(|c| c.addr.is_ipv6()));
+        assert!(
+            parsed
+                .iter()
+                .any(|c| c.plain_addr().is_some_and(|a| a.is_ipv4()))
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|c| c.plain_addr().is_some_and(|a| a.is_ipv6()))
+        );
         for c in &parsed {
+            let addr = c.plain_addr().unwrap();
+            assert!(is_usable_ip(addr.ip()), "{} is not a usable server", addr);
             assert!(
-                is_usable_ip(c.addr.ip()),
-                "{} is not a usable server",
-                c.addr
-            );
-            assert!(
-                c.name.chars().all(|ch| ch.is_ascii_graphic()),
+                c.provider.chars().all(|ch| ch.is_ascii_graphic()),
                 "bad name {:?}",
-                c.name
+                c.provider
             );
         }
     }
@@ -252,11 +569,15 @@ mod tests {
     fn the_pool_ignores_duplicates_and_keeps_the_first_label() {
         let mut pool = Pool::default();
         assert!(pool.is_empty());
-        assert!(pool.add(sa("1.1.1.1"), "Cloudflare"));
-        assert!(!pool.add(sa("1.1.1.1"), CURRENT));
-        assert!(pool.add(sa("1.1.1.1:5353"), "Other-port"));
+        assert!(pool.add(Candidate::plain(sa("1.1.1.1"), "Cloudflare", "Cloudflare")));
+        assert!(!pool.add(Candidate::plain(sa("1.1.1.1"), CURRENT, CURRENT)));
+        assert!(pool.add(Candidate::plain(
+            sa("1.1.1.1:5353"),
+            "Other-port",
+            "Other-port"
+        )));
         assert_eq!(pool.len(), 2);
-        assert_eq!(pool.items()[0].name, "Cloudflare");
+        assert_eq!(pool.items()[0].provider, "Cloudflare");
     }
 
     #[test]
@@ -330,5 +651,27 @@ mod tests {
                 "9.9.9.9".parse().unwrap()
             ]
         );
+    }
+
+    #[test]
+    fn candidate_ids_are_stable_and_distinct() {
+        let plain = Candidate::plain(sa("1.1.1.1"), "Cloudflare", "Cloudflare");
+        assert_eq!(plain.id, "plain:1.1.1.1:53");
+        let dot = Candidate::dot(
+            Some(sa("1.1.1.1")),
+            "cloudflare-dns.com",
+            853,
+            "Cloudflare",
+            "Cloudflare",
+        );
+        assert!(dot.id.starts_with("dot:cloudflare-dns.com:853:"));
+        let doh = Candidate::doh(
+            "https://cloudflare-dns.com/dns-query",
+            "Cloudflare",
+            "Cloudflare",
+        );
+        assert_eq!(doh.id, "doh:https://cloudflare-dns.com/dns-query");
+        assert_ne!(plain.id, dot.id);
+        assert_eq!(doh.kind(), Kind::Doh);
     }
 }

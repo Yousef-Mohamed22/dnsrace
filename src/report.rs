@@ -1,336 +1,131 @@
-//! Turns results into text and JSON. Everything here returns strings, so it is easy to test.
+//! Report exports: JSON, CSV and a self-contained HTML page.
+//!
+//! The terminal table is gone in 0.6.0; these functions are what the graphical interface uses
+//! for the Export buttons and for the clipboard summary. They deliberately accept only the
+//! structured result, so they can be tested without any GUI code.
 
-use std::collections::HashSet;
-use std::net::IpAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::bench::{Note, Row, SteerEntry, Steering};
-use crate::servers::{fmt_addr, is_known};
-use crate::util::median;
+use serde_json::{Value, json};
 
-/// A time in ms, or `n/a` when it could not be measured.
+use crate::bench::{Row, SecurityStatus, SteerEntry, Steering};
+use crate::engine::RunResult;
+use crate::util::format_time;
+
+/// A time in ms, or an em dash when it could not be measured.
 pub fn fmt_ms(v: Option<f64>) -> String {
     match v {
-        Some(x) => format!("{x:>6.1} ms"),
-        None => "      n/a".to_string(),
+        Some(x) => format!("{x:.1} ms"),
+        None => "—".to_string(),
     }
 }
 
-/// Wraps text in an ANSI color code when `on`.
-pub fn paint(s: &str, code: &str, on: bool) -> String {
-    if on {
-        format!("\x1b[{code}m{s}\x1b[0m")
-    } else {
-        s.to_string()
-    }
-}
-
-fn is_current(row: &Row, current: &HashSet<IpAddr>) -> bool {
-    row.addr.port() == 53 && current.contains(&row.addr.ip())
-}
-
-/// The ranked table, one line per server.
-pub fn table(rows: &[Row], current: &HashSet<IpAddr>, color: bool) -> String {
-    let addr_w = rows
-        .iter()
-        .map(|r| fmt_addr(r.addr).len())
-        .max()
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
         .unwrap_or(0)
-        .max(15);
-    let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max(8);
-    let mut lines = vec![
-        "== Results: average of the cached and uncached medians, lower is better ==".to_string(),
-    ];
-    for (i, r) in rows.iter().enumerate() {
-        let flag = match r.note {
-            Note::Ok => String::new(),
-            Note::Hijacks => paint("  HIJACKS-NXDOMAIN", "31", color),
-            Note::Unreliable => paint("  UNRELIABLE", "31", color),
-        };
-        let marker = if is_current(r, current) {
-            paint("  <== current", "33", color)
-        } else {
-            String::new()
-        };
-        lines.push(format!(
-            "{:>2}. {:<addr_w$} {:<name_w$} cached {}  uncached {}  timeouts {}{}{}",
-            i + 1,
-            fmt_addr(r.addr),
-            r.name,
-            fmt_ms(r.cached),
-            fmt_ms(r.uncached),
-            r.timeouts,
-            flag,
-            marker,
-        ));
-    }
-    lines.join("\n")
 }
 
-/// A more detailed table: how steady each server's cached lookups were, and whether it
-/// validates DNSSEC. Shown with `--verbose`.
-pub fn details(rows: &[Row]) -> String {
-    let addr_w = rows
-        .iter()
-        .map(|r| fmt_addr(r.addr).len())
-        .max()
-        .unwrap_or(0)
-        .max(15);
-    let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max(8);
-    let mut lines = vec![
-        "== Details: cached-lookup spread, and whether the server sets the DNSSEC AD bit =="
-            .to_string(),
-    ];
-    for (i, r) in rows.iter().enumerate() {
-        let dnssec = match r.dnssec {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "?",
-        };
-        lines.push(format!(
-            "{:>2}. {:<addr_w$} {:<name_w$} min {}  p95 {}  jitter {}  DNSSEC {}",
-            i + 1,
-            fmt_addr(r.addr),
-            r.name,
-            fmt_ms(r.cached_min),
-            fmt_ms(r.cached_p95),
-            fmt_ms(r.cached_jitter),
-            dnssec,
-        ));
-    }
-    lines.join("\n")
+fn security(row: &Row) -> &'static str {
+    row.security_status().label()
 }
 
-fn label(row: Option<&Row>) -> String {
-    row.map(|r| format!("{} ({})", fmt_addr(r.addr), r.name))
-        .unwrap_or_else(|| "-".to_string())
+fn row_value(row: &Row, rank: usize) -> Value {
+    json!({
+        "rank": rank,
+        "id": row.id,
+        "provider": row.provider,
+        "name": row.label,
+        "transport": row.transport.label(),
+        "server": row.endpoint,
+        "addr": row.addr.map(|a| a.ip().to_string()),
+        "port": row.addr.map(|a| a.port()),
+        "is_doh": row.is_doh(),
+        "encrypted": !row.is_plain(),
+        "cached_ms": row.cached,
+        "uncached_ms": row.uncached,
+        "score_ms": row.score,
+        "cached_min_ms": row.cached_min,
+        "cached_p95_ms": row.cached_p95,
+        "cached_p99_ms": row.cached_p99,
+        "cached_mean_ms": row.cached_mean,
+        "cached_max_ms": row.cached_max,
+        "cached_jitter_ms": row.cached_jitter,
+        "timeouts": row.timeouts,
+        "note": row.note.label(),
+        "healthy": row.healthy(),
+        "recommendable": row.recommendable(),
+        "dnssec_ad": row.dnssec,
+        "dnssec_rejects_bogus": row.dnssec_bogus,
+        "security": row.security_status().label(),
+    })
 }
 
-fn fastest(rows: &[Row]) -> Option<&Row> {
-    rows.iter().find(|r| r.healthy())
+fn steering_value(s: &Steering) -> Value {
+    json!({
+        "host": s.host,
+        "servers": s.servers,
+        "addresses": s.entries.iter().map(|e| {
+            json!({
+                "ip": e.ip.to_string(),
+                "returned_by": e.returned_by,
+                "connects_ms": e.connects,
+                "median_connect_ms": median_connect(e),
+                "failed": e.connects.iter().filter(|v| v.is_none()).count(),
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
-fn fastest_known(rows: &[Row]) -> Option<&Row> {
-    rows.iter().find(|r| r.healthy() && is_known(&r.name))
+fn median_connect(entry: &SteerEntry) -> Option<f64> {
+    let mut values: Vec<f64> = entry.connects.iter().flatten().copied().collect();
+    crate::util::median(&mut values)
 }
 
-/// The server we suggest: the fastest healthy provider from the built-in list, or the fastest
-/// healthy server of any kind when no listed provider works.
-pub fn recommended(rows: &[Row]) -> Option<&Row> {
-    fastest_known(rows).or_else(|| fastest(rows))
+fn recommendation(result: &RunResult) -> Option<Value> {
+    let row = result.best()?;
+    Some(json!({
+        "provider": row.provider,
+        "name": row.label,
+        "transport": row.transport.label(),
+        "server": row.endpoint,
+        "score_ms": row.score,
+        "security": row.security_status().label(),
+        "applies_to_system": row.is_plain() && row.plain_ip().is_some(),
+    }))
 }
 
-fn average(row: &Row) -> f64 {
-    row.score
-}
-
-/// The summary: a clear recommendation, where your current DNS ranks, and how much switching
-/// would actually gain you.
-pub fn summary(rows: &[Row], current: &HashSet<IpAddr>, color: bool, repeat: usize) -> String {
-    let rec = recommended(rows);
-    let fastest = fastest(rows);
-    let mut lines = Vec::new();
-
-    match rec {
-        Some(r) => lines.push(paint(
-            &format!(
-                "Recommended:            {} - {:.1} ms average",
-                label(Some(r)),
-                average(r)
-            ),
-            "1;32",
-            color,
-        )),
-        None => lines.push(paint(
-            "Recommended:            none (no healthy server was measured)",
-            "1;31",
-            color,
-        )),
-    }
-    if let (Some(f), Some(r)) = (fastest, rec)
-        && f.addr != r.addr
-    {
-        lines.push(format!(
-            "Fastest overall:        {} - {:.1} ms average",
-            label(Some(f)),
-            average(f)
-        ));
-    }
-
-    let mine: Vec<(usize, &Row)> = rows
+/// A complete machine-readable report. The existing top-level keys stay stable for scripts.
+pub fn json(result: &RunResult) -> String {
+    let rows: Vec<Value> = result
+        .rows
         .iter()
         .enumerate()
-        .filter(|(_, r)| is_current(r, current))
+        .map(|(index, row)| row_value(row, index + 1))
         .collect();
-    if !mine.is_empty() {
-        let ranks = mine
-            .iter()
-            .map(|(i, r)| format!("#{} ({})", i + 1, fmt_addr(r.addr)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let best = mine
-            .iter()
-            .map(|(_, r)| *r)
-            .min_by(|a, b| a.score.total_cmp(&b.score));
-        let detail = match (best, rec) {
-            (Some(b), Some(r)) if b.addr == r.addr => {
-                " - already the recommended choice".to_string()
-            }
-            (Some(b), Some(r)) if average(b) <= average(r) => {
-                format!(
-                    " - {:.1} ms faster per lookup than the recommendation",
-                    average(r) - average(b)
-                )
-            }
-            (Some(b), Some(r)) => {
-                format!(
-                    " - {:.1} ms slower per lookup than the recommendation",
-                    average(b) - average(r)
-                )
-            }
-            _ => String::new(),
-        };
-        lines.push(format!(
-            "Your current DNS:       {} of {} tested{}",
-            ranks,
-            rows.len(),
-            detail
-        ));
-    }
-
-    let checked: Vec<&Row> = rows
-        .iter()
-        .filter(|r| r.healthy() && r.dnssec.is_some())
-        .collect();
-    if !checked.is_empty() {
-        let yes = checked.iter().filter(|r| r.dnssec == Some(true)).count();
-        lines.push(format!(
-            "DNSSEC validation:      {yes} of {} healthy servers set the AD bit",
-            checked.len()
-        ));
-    }
-
-    let mut seen_providers: HashSet<&str> = HashSet::new();
-    let known: Vec<&Row> = rows
-        .iter()
-        .filter(|r| r.healthy() && is_known(&r.name) && seen_providers.insert(r.name.as_str()))
-        .collect();
-    if known.len() >= 2 {
-        let gap = known[1].score - known[0].score;
-        if gap < 1.5 {
-            let hint = if repeat < 3 {
-                "use --repeat 3 for a steadier winner"
-            } else {
-                "run again at a different time to confirm"
-            };
-            lines.push(format!(
-                "Close call:             the top two providers are within {gap:.1} ms; {hint}"
-            ));
-        }
-    }
-
-    let current_best = mine
-        .iter()
-        .map(|(_, r)| *r)
-        .min_by(|a, b| a.score.total_cmp(&b.score));
-    if let (Some(r), Some(b)) = (rec, current_best) {
-        let gap = average(b) - average(r);
-        let (text, code) = if b.addr == r.addr {
-            (
-                "your current DNS is already the recommended server; no change needed.".to_string(),
-                "1;32",
-            )
-        } else if gap.abs() <= 1.0 {
-            (
-                "the difference is under 1 ms per lookup; either choice is fine.".to_string(),
-                "1;33",
-            )
-        } else if gap < 0.0 {
-            (
-                format!(
-                    "your current DNS is about {:.1} ms faster per lookup than the recommendation; no change needed for speed.",
-                    -gap
-                ),
-                "1;33",
-            )
-        } else {
-            (
-                format!(
-                    "switching to {} would save about {gap:.1} ms per DNS lookup.",
-                    fmt_addr(r.addr)
-                ),
-                "1;32",
-            )
-        };
-        lines.push(paint(
-            &format!("Verdict:                {text}"),
-            code,
-            color,
-        ));
-    } else if let Some(r) = rec {
-        lines.push(paint(
-            &format!(
-                "Verdict:                use {} ({}); your current DNS was not detected.",
-                fmt_addr(r.addr),
-                r.name
-            ),
-            "1;32",
-            color,
-        ));
-    }
-
-    lines.join("\n")
+    let steerings: Vec<Value> = result.steerings.iter().map(steering_value).collect();
+    let value = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "generated": now(),
+        "generated_utc": format_time(now()),
+        "protocol": result.protocol.label(),
+        "family": result.family.label(),
+        "duration_seconds": result.duration_secs,
+        "scanned": result.scanned,
+        "tested": result.tested,
+        "data_center": result.data_center,
+        "current_dns": result.current_dns.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "recommendation": recommendation(result),
+        "steering": steerings.first().cloned(),
+        "steerings": steerings,
+        "results": rows,
+    });
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".to_string())
 }
-
-/// The median connect time of an entry and how many attempts failed.
-fn connect_summary(e: &SteerEntry) -> (Option<f64>, usize) {
-    let mut ok: Vec<f64> = e.connects.iter().flatten().copied().collect();
-    let failed = e.connects.len() - ok.len();
-    (median(&mut ok), failed)
-}
-
-fn connect_text(e: &SteerEntry) -> String {
-    match connect_summary(e) {
-        (Some(m), 0) => format!("{m:.0} ms"),
-        (Some(m), failed) => format!("{m:.0} ms ({failed} of {} failed)", e.connects.len()),
-        (None, _) => "FAILED".to_string(),
-    }
-}
-
-/// The "where does this site go" section.
-pub fn steering_text(s: &Steering) -> String {
-    let mut lines = vec![format!(
-        "== {}: addresses handed out by the {} fastest servers, and TCP connect time to each ==",
-        s.host, s.servers
-    )];
-    if s.entries.is_empty() {
-        lines.push(format!("no server returned an address for {}", s.host));
-        return lines.join("\n");
-    }
-    let w = s
-        .entries
-        .iter()
-        .map(|e| e.ip.to_string().len())
-        .max()
-        .unwrap_or(0)
-        .max(15);
-    for e in &s.entries {
-        lines.push(format!(
-            "{:<w$} connect {:<26} returned by {} of {} servers",
-            e.ip.to_string(),
-            connect_text(e),
-            e.returned_by,
-            s.servers
-        ));
-    }
-    lines.join("\n")
-}
-
-// ---------------------------------------------------------------------------------------
-// CSV
-// ---------------------------------------------------------------------------------------
 
 fn csv_field(s: &str) -> String {
-    if s.chars().any(|c| matches!(c, ',' | '"' | '\n' | '\r')) {
+    if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
@@ -338,743 +133,357 @@ fn csv_field(s: &str) -> String {
 }
 
 fn csv_num(v: Option<f64>) -> String {
-    v.filter(|x| x.is_finite())
-        .map(|x| format!("{x:.1}"))
-        .unwrap_or_default()
+    v.map(|x| format!("{x:.3}")).unwrap_or_default()
 }
 
-fn flag_name(note: Note) -> &'static str {
-    match note {
-        Note::Ok => "",
-        Note::Hijacks => "HIJACKS-NXDOMAIN",
-        Note::Unreliable => "UNRELIABLE",
-    }
-}
-
-/// The results as CSV, one row per server, ready for a spreadsheet.
-pub fn csv(rows: &[Row], current: &HashSet<IpAddr>) -> String {
-    let mut lines = vec![
-        "rank,server,name,cached_ms,uncached_ms,min_ms,p95_ms,jitter_ms,timeouts,flag,dnssec,current"
-            .to_string(),
-    ];
-    for (i, r) in rows.iter().enumerate() {
-        let dnssec = match r.dnssec {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "",
-        };
-        lines.push(format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{}",
-            i + 1,
-            csv_field(&fmt_addr(r.addr)),
-            csv_field(&r.name),
-            csv_num(r.cached),
-            csv_num(r.uncached),
-            csv_num(r.cached_min),
-            csv_num(r.cached_p95),
-            csv_num(r.cached_jitter),
-            r.timeouts,
-            flag_name(r.note),
-            dnssec,
-            is_current(r, current),
-        ));
-    }
-    lines.join("\n")
-}
-
-// ---------------------------------------------------------------------------------------
-// JSON (written by hand: the output is small and flat, so no extra dependency is needed)
-// ---------------------------------------------------------------------------------------
-
-fn jstr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn jnum(v: Option<f64>) -> String {
-    match v {
-        Some(x) if x.is_finite() => format!("{x:.1}"),
-        _ => "null".to_string(),
-    }
-}
-
-fn jopt(s: Option<String>) -> String {
-    s.map_or_else(|| "null".to_string(), |s| jstr(&s))
-}
-
-fn jbool(v: Option<bool>) -> String {
+fn csv_opt_bool(v: Option<bool>) -> String {
     match v {
         Some(true) => "true".to_string(),
         Some(false) => "false".to_string(),
-        None => "null".to_string(),
+        None => String::new(),
     }
 }
 
-fn steering_json(s: &Steering) -> String {
-    let entries: Vec<String> = s
-        .entries
-        .iter()
-        .map(|e| {
-            let (median_ms, failed) = connect_summary(e);
-            format!(
-                "      {{\"ip\": {}, \"returned_by\": {}, \"connect_ms\": {}, \"failed\": {}}}",
-                jstr(&e.ip.to_string()),
-                e.returned_by,
-                jnum(median_ms),
-                failed
-            )
-        })
-        .collect();
-    format!(
-        "{{\n    \"host\": {},\n    \"servers\": {},\n    \"addresses\": [\n{}\n    ]\n  }}",
-        jstr(&s.host),
-        s.servers,
-        entries.join(",\n")
-    )
-}
-
-/// The whole result as one JSON document.
-///
-/// `steering` keeps the original single-host shape for compatibility. `steerings` contains
-/// every requested hostname, in the order they were given.
-pub fn json(
-    version: &str,
-    data_center: Option<&str>,
-    rows: &[Row],
-    current: &HashSet<IpAddr>,
-    steerings: &[Steering],
-) -> String {
-    let results: Vec<String> = rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            format!(
-                "    {{\"rank\": {}, \"server\": {}, \"name\": {}, \"cached_ms\": {}, \"uncached_ms\": {}, \"min_ms\": {}, \"p95_ms\": {}, \"jitter_ms\": {}, \"timeouts\": {}, \"flag\": {}, \"dnssec\": {}, \"current\": {}}}",
-                i + 1,
-                jstr(&fmt_addr(r.addr)),
-                jstr(&r.name),
-                jnum(r.cached),
-                jnum(r.uncached),
-                jnum(r.cached_min),
-                jnum(r.cached_p95),
-                jnum(r.cached_jitter),
-                r.timeouts,
-                jopt(match r.note {
-                    Note::Ok => None,
-                    Note::Hijacks => Some("HIJACKS-NXDOMAIN".to_string()),
-                    Note::Unreliable => Some("UNRELIABLE".to_string()),
-                }),
-                jbool(r.dnssec),
-                is_current(r, current),
-            )
-        })
-        .collect();
-    let all_steerings: Vec<String> = steerings.iter().map(steering_json).collect();
-    let steer = steerings
-        .first()
-        .map_or_else(|| "null".to_string(), steering_json);
-    let steer_all = if all_steerings.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[\n    {}\n  ]", all_steerings.join(",\n    "))
-    };
-    format!(
-        "{{\n  \"dnsrace\": {},\n  \"data_center\": {},\n  \"results\": [\n{}\n  ],\n  \"recommended\": {},\n  \"fastest\": {},\n  \"fastest_known\": {},\n  \"steering\": {},\n  \"steerings\": {}\n}}",
-        jstr(version),
-        jopt(data_center.map(str::to_string)),
-        results.join(",\n"),
-        jopt(recommended(rows).map(|r| fmt_addr(r.addr))),
-        jopt(fastest(rows).map(|r| fmt_addr(r.addr))),
-        jopt(fastest_known(rows).map(|r| fmt_addr(r.addr))),
-        steer,
-        steer_all
-    )
-}
-
-// ---------------------------------------------------------------------------------------
-// HTML report
-// ---------------------------------------------------------------------------------------
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-fn steering_html(steerings: &[Steering]) -> String {
-    if steerings.is_empty() {
-        return String::new();
-    }
-    let mut sections = String::from("<h2>Steering</h2>\n");
-    for s in steerings {
-        sections.push_str(&format!(
-            "<section class=\"steering\">\n<h3>{}</h3>\n",
-            html_escape(&s.host)
+/// A comma-separated report with every field the interface shows.
+pub fn csv(result: &RunResult) -> String {
+    let mut out = String::from(
+        "rank,provider,name,transport,server,addr,port,is_doh,encrypted,\
+cached_ms,uncached_ms,score_ms,cached_min_ms,cached_p95_ms,cached_p99_ms,cached_mean_ms,\
+cached_max_ms,cached_jitter_ms,timeouts,note,healthy,recommendable,dnssec_ad,\
+dnssec_rejects_bogus,security\n",
+    );
+    for (index, row) in result.rows.iter().enumerate() {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            index + 1,
+            csv_field(&row.provider),
+            csv_field(&row.label),
+            row.transport.label(),
+            csv_field(&row.endpoint),
+            row.addr.map(|a| a.ip().to_string()).unwrap_or_default(),
+            row.addr.map(|a| a.port().to_string()).unwrap_or_default(),
+            row.is_doh(),
+            !row.is_plain(),
+            csv_num(row.cached),
+            csv_num(row.uncached),
+            csv_num(Some(row.score)),
+            csv_num(row.cached_min),
+            csv_num(row.cached_p95),
+            csv_num(row.cached_p99),
+            csv_num(row.cached_mean),
+            csv_num(row.cached_max),
+            csv_num(row.cached_jitter),
+            row.timeouts,
+            csv_field(row.note.label()),
+            row.healthy(),
+            row.recommendable(),
+            csv_opt_bool(row.dnssec),
+            csv_opt_bool(row.dnssec_bogus),
+            csv_field(row.security_status().label()),
         ));
-        if s.servers == 0 {
-            sections.push_str(
-                "<p class=\"muted\">No healthy port-53 server was available for a steering check.</p>\n</section>\n",
-            );
-            continue;
+    }
+    out
+}
+
+fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
         }
-        sections.push_str(&format!(
-            "<p class=\"muted\">Addresses handed out by the {} fastest servers, and TCP connect time to each.</p>\n",
+    }
+    out
+}
+
+fn security_class(row: &Row) -> &'static str {
+    match row.security_status() {
+        SecurityStatus::Validated => "ok",
+        SecurityStatus::Insecure | SecurityStatus::Partial | SecurityStatus::Unknown => "warn",
+        SecurityStatus::BogusAccepted => "bad",
+    }
+}
+
+fn steering_html(s: &Steering) -> String {
+    if s.entries.is_empty() {
+        return format!(
+            "<section class=\"card\"><h3>{}</h3><p class=\"muted\">No addresses were returned by the {} tested servers.</p></section>",
+            escape(&s.host),
             s.servers
-        ));
-        if s.entries.is_empty() {
-            sections
-                .push_str("<p>No server returned an address for this hostname.</p>\n</section>\n");
-            continue;
-        }
-        sections.push_str(
-            "<table>\n<thead>\n<tr><th>Address</th><th>Returned by</th><th>Median connect</th><th>Failed attempts</th></tr>\n</thead>\n<tbody>\n",
         );
-        for e in &s.entries {
-            let (median_ms, failed) = connect_summary(e);
-            sections.push_str(&format!(
-                "<tr><td>{}</td><td>{} of {}</td><td>{}</td><td>{} of {}</td></tr>\n",
-                e.ip,
-                e.returned_by,
-                s.servers,
-                median_ms
-                    .map(|ms| format!("{ms:.0} ms"))
-                    .unwrap_or_else(|| "FAILED".to_string()),
-                failed,
-                e.connects.len()
-            ));
-        }
-        sections.push_str("</tbody>\n</table>\n</section>\n");
     }
-    sections
+    let mut rows = String::new();
+    for entry in &s.entries {
+        let connects: Vec<String> = entry
+            .connects
+            .iter()
+            .map(|v| {
+                v.map(|x| format!("{x:.1} ms"))
+                    .unwrap_or_else(|| "failed".into())
+            })
+            .collect();
+        rows.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{} of {}</td><td>{}</td><td>{}</td></tr>",
+            escape(&entry.ip.to_string()),
+            entry.returned_by,
+            s.servers,
+            connects.join(" · "),
+            fmt_ms(median_connect(entry))
+        ));
+    }
+    format!(
+        "<section class=\"card\"><h3>{}</h3><p class=\"muted\">Addresses handed out by the {} fastest plain-DNS servers, and TCP connect time to each.</p><table><thead><tr><th>Address</th><th>Returned by</th><th>Connect attempts</th><th>Median</th></tr></thead><tbody>{}</tbody></table></section>",
+        escape(&s.host),
+        s.servers,
+        rows
+    )
 }
 
-/// The whole result as a self-contained HTML report.
-pub fn html(
-    version: &str,
-    data_center: Option<&str>,
-    rows: &[Row],
-    current: &HashSet<IpAddr>,
-    steerings: &[Steering],
-) -> String {
-    let rec = recommended(rows);
-    let fastest = fastest(rows);
-    let now = time_stamp();
-
-    let rows_html: String = rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let flag_class = match r.note {
-                Note::Ok => "ok",
-                Note::Hijacks => "flag hijacks",
-                Note::Unreliable => "flag unreliable",
-            };
-            let current_mark = if is_current(r, current) {
-                " <span class=\"current\">&lt;== current</span>"
-            } else {
-                ""
-            };
-            let dnssec = match r.dnssec {
-                Some(true) => "yes",
-                Some(false) => "no",
-                None => "?",
-            };
-            let doh_mark = if r.is_doh { " (DoH)" } else { "" };
+/// A standalone HTML report with the same information as the desktop results table.
+pub fn html(result: &RunResult) -> String {
+    let generated = format_time(now());
+    let recommendation = result
+        .best()
+        .map(|row| {
             format!(
-                "<tr>\n<td>{}</td>\n<td>{}{}{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td>{}</td>\n<td class=\"{}\">{}</td>\n</tr>",
-                i + 1,
-                fmt_addr(r.addr),
-                doh_mark,
-                current_mark,
-                html_escape(&r.name),
-                fmt_ms(r.cached),
-                fmt_ms(r.cached_mean),
-                fmt_ms(r.cached_min),
-                fmt_ms(r.cached_max),
-                fmt_ms(r.cached_p95),
-                fmt_ms(r.cached_p99),
-                fmt_ms(r.cached_jitter),
-                r.timeouts,
-                dnssec,
-                flag_class,
-                match r.note {
-                    Note::Ok => "",
-                    Note::Hijacks => "HIJACKS-NXDOMAIN",
-                    Note::Unreliable => "UNRELIABLE",
-                },
+                "<div class=\"winner\"><div class=\"eyebrow\">Recommended</div><div class=\"winner-name\">{} <span class=\"muted\">{}</span></div><div class=\"winner-time\">{}</div><div class=\"badge {}\">{}</div></div>",
+                escape(&row.label),
+                escape(&row.endpoint),
+                fmt_ms(Some(row.score)),
+                security_class(row),
+                escape(security(row)),
             )
         })
+        .unwrap_or_else(|| "<div class=\"winner\"><div class=\"winner-name\">No recommendation</div><p class=\"muted\">No resolver completed enough measurements.</p></div>".to_string());
+
+    let mut rows = String::new();
+    for (index, row) in result.rows.iter().enumerate() {
+        let status = if row.healthy() { "ok" } else { "bad" };
+        rows.push_str(&format!(
+            "<tr><td>{}</td><td><strong>{}</strong><br><span class=\"muted\">{}</span></td><td><code>{}</code></td><td>{}</td><td>{}</td><td class=\"score\">{}</td><td>{}</td><td><span class=\"badge {}\">{}</span></td><td><span class=\"badge {}\">{}</span></td></tr>",
+            index + 1,
+            escape(&row.label),
+            escape(&row.provider),
+            escape(&row.endpoint),
+            fmt_ms(row.cached),
+            fmt_ms(row.uncached),
+            fmt_ms(Some(row.score)),
+            escape(row.note.label()),
+            security_class(row),
+            escape(security(row)),
+            status,
+            if row.healthy() { "OK" } else { "Check" },
+        ));
+    }
+    let steering = result
+        .steerings
+        .iter()
+        .map(steering_html)
         .collect::<Vec<_>>()
         .join("\n");
-
-    let rec_label = rec.map(|r| format!("{} ({})", fmt_addr(r.addr), html_escape(&r.name)));
-    let fastest_label = fastest.map(|r| format!("{} ({})", fmt_addr(r.addr), html_escape(&r.name)));
-    let steering_sections = steering_html(steerings);
-
+    let current = if result.current_dns.is_empty() {
+        "not detected".to_string()
+    } else {
+        result
+            .current_dns
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     format!(
-        r#"<!DOCTYPE html>
+        r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>dnsrace {version} results</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dnsrace report</title>
 <style>
-  body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; background: #f5f5f5; }}
-  h1 {{ margin-top: 0; }}
-  table {{ border-collapse: collapse; width: 100%; background: white; }}
-  th, td {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 14px; }}
-  th {{ background: #e8e8e8; }}
-  tr:nth-child(even) td {{ background: #fafafa; }}
-  .flag.hijacks {{ color: #b00020; font-weight: bold; }}
-  .flag.unreliable {{ color: #b00020; font-weight: bold; }}
-  .current {{ color: #b8860b; font-weight: bold; }}
-  .summary {{ max-width: 700px; margin: 2rem 0; font-size: 15px; line-height: 1.6; }}
-  .verdict-ok {{ color: #008000; font-weight: bold; }}
-  .verdict-warn {{ color: #b8860b; font-weight: bold; }}
-  .verdict-stay {{ color: #b8860b; font-weight: bold; }}
-  .muted {{ color: #666; }}
-  .doh {{ font-size: 0.85em; color: #666; }}
-  .steering {{ margin: 1.5rem 0 2rem; }}
-  .steering h3 {{ margin-bottom: 0.25rem; }}
+:root{{color-scheme:dark;--bg:#111419;--panel:#191e26;--line:#2a313d;--text:#e8edf5;--muted:#8c98a9;--accent:#69a7ff;--ok:#4ed6a1;--warn:#f1c56b;--bad:#ff7b7b}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}}
+main{{max-width:1180px;margin:0 auto;padding:40px 24px 80px}}h1{{font-size:34px;margin:0 0 4px}}h2{{font-size:20px;margin:32px 0 12px}}h3{{margin:0 0 8px}}p{{margin:8px 0}}
+.muted{{color:var(--muted)}}.eyebrow{{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:var(--muted)}}
+.sub{{color:var(--muted);margin-bottom:24px}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:24px 0}}
+.card{{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}}.card strong{{display:block;font-size:18px}}
+.winner{{background:linear-gradient(135deg,#1c2a42,#17251f);border:1px solid #33537a;border-radius:16px;padding:24px;margin:18px 0;display:grid;grid-template-columns:1fr auto;gap:8px}}
+.winner-name{{font-size:24px;font-weight:700}}.winner-time{{font-size:32px;font-weight:700;grid-column:2;grid-row:1/4;align-self:center;color:var(--ok)}}
+table{{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}}
+th,td{{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}}th{{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}}
+tr:last-child td{{border-bottom:0}}.score{{font-weight:700;color:var(--accent)}}code{{font-size:12px;color:#cbd6e7}}
+.badge{{display:inline-block;border-radius:999px;padding:2px 8px;font-size:11px;font-weight:600;border:1px solid}} .badge.ok{{color:var(--ok);border-color:#2e7259;background:#132a22}} .badge.warn{{color:var(--warn);border-color:#725d2e;background:#2a2413}} .badge.bad{{color:var(--bad);border-color:#723232;background:#2a1313}}
+section.card{{margin:12px 0 18px}}footer{{margin-top:36px;color:var(--muted);font-size:12px}}
 </style>
 </head>
-<body>
-<h1>dnsrace {version} results</h1>
-<p class="muted">Generated {now}</p>
-{potential_dc}
-<h2>Results</h2>
-<table>
-<thead>
-<tr><th>#</th><th>Server</th><th>Provider</th><th>Cached</th><th>Mean</th><th>Min</th><th>Max</th><th>P95</th><th>P99</th><th>Jitter</th><th>Timeouts</th><th>DNSSEC</th><th>Flag</th></tr>
-</thead>
-<tbody>
-{rows_html}
-</tbody>
-</table>
-{steering_sections}
-<h2>Summary</h2>
-<div class="summary">
-<p><strong>Recommended:</strong> {rec}</p>
-{fastest_p}
-{verdict}
+<body><main>
+<div class="eyebrow">dnsrace {version} · {generated}</div>
+<h1>DNS benchmark report</h1>
+<p class="sub">{protocol} · {family} · {tested} tested in {duration:.1} s</p>
+<div class="cards">
+<div class="card"><span class="eyebrow">Current DNS</span><strong>{current}</strong></div>
+<div class="card"><span class="eyebrow">Cloudflare edge</span><strong>{dc}</strong></div>
+<div class="card"><span class="eyebrow">Candidates scanned</span><strong>{scanned}</strong></div>
+<div class="card"><span class="eyebrow">Full tests</span><strong>{tested}</strong></div>
 </div>
-<p class="muted">DNS-over-HTTPS (DoH) servers are queried over HTTPS, not port 53. A DNS server sees every site you visit — only switch to one you trust.</p>
-</body>
-</html>"#,
-        version = version,
-        now = now,
-        potential_dc = data_center
-            .map(|dc| format!(
-                "<p class=\"muted\"><strong>Cloudflare data center:</strong> {}</p>\n",
-                html_escape(dc)
-            ))
-            .unwrap_or_default(),
-        rec = rec_label.as_deref().unwrap_or("none"),
-        fastest_p = fastest_label
-            .as_ref()
-            .map(|l| format!("<p><strong>Fastest overall:</strong> {l}</p>"))
-            .unwrap_or_default(),
-        steering_sections = steering_sections,
-        verdict = verdict_html(rec, fastest, rows, current),
+{recommendation}
+<h2>All results</h2>
+<table><thead><tr><th>#</th><th>Provider</th><th>Server</th><th>Cached</th><th>Uncached</th><th>Score</th><th>Status</th><th>DNSSEC</th><th>Health</th></tr></thead><tbody>{rows}</tbody></table>
+<h2>Steering</h2>
+{steering}
+<footer>Generated locally by dnsrace. Latency depends on your connection and the time of day.</footer>
+</main></body></html>"#,
+        version = env!("CARGO_PKG_VERSION"),
+        generated = escape(&generated),
+        protocol = result.protocol.label(),
+        family = result.family.label(),
+        tested = result.tested,
+        duration = result.duration_secs,
+        current = escape(&current),
+        dc = escape(result.data_center.as_deref().unwrap_or("not detected")),
+        scanned = result.scanned,
+        recommendation = recommendation,
+        rows = rows,
+        steering = steering,
     )
 }
 
-/// A short verdict paragraph for the HTML report.
-fn verdict_html(
-    rec: Option<&Row>,
-    fastest: Option<&Row>,
-    rows: &[Row],
-    current: &HashSet<IpAddr>,
-) -> String {
-    let mut lines = Vec::new();
-    if let (Some(r), Some(f)) = (rec, fastest)
-        && f.addr != r.addr
-    {
-        lines.push(format!(
-            "<p><strong>Fastest overall:</strong> {} ({})</p>",
-            fmt_addr(f.addr),
-            html_escape(&f.name)
+/// A short plain-text summary for the clipboard or a notification.
+pub fn summary_text(result: &RunResult) -> String {
+    let mut out = format!(
+        "dnsrace {} — {} — {}\n",
+        env!("CARGO_PKG_VERSION"),
+        result.protocol.label(),
+        format_time(now())
+    );
+    if let Some(row) = result.best() {
+        out.push_str(&format!(
+            "Fastest: {} ({}) — {}\n",
+            row.label,
+            row.endpoint,
+            fmt_ms(Some(row.score))
         ));
+        out.push_str(&format!("Security: {}\n", row.security_status().label()));
+        if let Some(ip) = row.plain_ip() {
+            out.push_str(&format!("Address: {}\n", ip));
+        }
+    } else {
+        out.push_str("No recommendable resolver completed the run.\n");
     }
-    let mine: Vec<&Row> = rows.iter().filter(|r| is_current(r, current)).collect();
-    if let (Some(rec), Some(best_mine)) = (
-        rec,
-        mine.iter()
-            .copied()
-            .min_by(|a, b| a.score.total_cmp(&b.score)),
-    ) {
-        let gap = best_mine.score - rec.score;
-        let verdict: String = if best_mine.addr == rec.addr {
-            "Your current DNS is already the recommended server.".to_string()
-        } else if gap.abs() <= 1.0 {
-            "The difference is under 1 ms; either choice is fine.".to_string()
-        } else if gap < 0.0 {
-            format!(
-                "Your current DNS is about {:.1} ms faster; no change needed for speed.",
-                -gap
-            )
-        } else {
-            format!(
-                "Switching to {} would save about {:.1} ms per lookup.",
-                fmt_addr(rec.addr),
-                gap
-            )
-        };
-        let class = if best_mine.addr == rec.addr || gap < 0.0 || gap.abs() <= 1.0 {
-            "verdict-stay"
-        } else {
-            "verdict-ok"
-        };
-        lines.push(format!(
-            "<p class=\"{}\"><strong>Verdict:</strong> {}</p>",
-            class, verdict
-        ));
-    } else if let Some(r) = rec {
-        lines.push(format!(
-            "<p class=\"verdict-ok\"><strong>Verdict:</strong> Use {} ({}); your current DNS was not detected.</p>",
-            fmt_addr(r.addr),
-            html_escape(&r.name)
-        ));
-    }
-    lines.join("")
-}
-
-fn time_stamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| {
-            let secs = d.as_secs();
-            // Simple human-readable timestamp: YYYY-MM-DD HH:MM:SS UTC
-            // Approximate calculation without external crates
-            let mut remaining = secs;
-            let sec = remaining % 60;
-            remaining /= 60;
-            let minute = remaining % 60;
-            remaining /= 60;
-            let hour = remaining % 24;
-            let days_since_epoch = remaining / 24;
-            // Approximate date from days since 1970-01-01
-            let mut year = 1970;
-            let mut days = days_since_epoch;
-            loop {
-                let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-                if days < days_in_year {
-                    break;
-                }
-                days -= days_in_year;
-                year += 1;
-            }
-            let month_lengths = [
-                31,
-                if is_leap_year(year) { 29 } else { 28 },
-                31,
-                30,
-                31,
-                30,
-                31,
-                31,
-                30,
-                31,
-                30,
-                31,
-            ];
-            let mut month = 0;
-            for &ml in &month_lengths {
-                if days < ml {
-                    break;
-                }
-                days -= ml;
-                month += 1;
-            }
-            let day = days + 1;
-            format!(
-                "{year:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
-                month + 1,
-                day,
-                hour,
-                minute,
-                sec
-            )
-        })
-        .unwrap_or_else(|_| "unknown time".to_string())
-}
-
-fn is_leap_year(year: u32) -> bool {
-    year.is_multiple_of(4) && !year.is_multiple_of(100) || year.is_multiple_of(400)
+    out.push_str(&format!(
+        "Protocol: {} · Tested: {} · Duration: {:.1} s\n",
+        result.protocol.label(),
+        result.tested,
+        result.duration_secs
+    ));
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bench::Note;
+    use crate::servers::{Family, Protocol};
 
-    fn row(
-        addr: &str,
-        name: &str,
-        cached: Option<f64>,
-        uncached: Option<f64>,
-        timeouts: u32,
-        note: Note,
-    ) -> Row {
-        Row {
-            addr: crate::servers::parse_addr(addr).unwrap(),
-            name: name.to_string(),
-            is_doh: false,
-            cached,
-            uncached,
-            cached_min: cached.map(|x| x - 1.0),
-            cached_max: cached.map(|x| x + 1.0),
-            cached_p95: cached.map(|x| x + 2.0),
-            cached_p99: cached.map(|x| x + 3.0),
-            cached_mean: cached,
-            cached_jitter: cached.map(|_| 1.5),
+    fn sample_result() -> RunResult {
+        let row = Row {
+            id: "plain:1.1.1.1:53".into(),
+            provider: "Cloudflare".into(),
+            label: "Cloudflare".into(),
+            transport: Protocol::Udp,
+            addr: Some("1.1.1.1:53".parse().unwrap()),
+            endpoint: "1.1.1.1".into(),
+            cached: Some(12.34),
+            uncached: Some(23.45),
+            cached_min: Some(10.0),
+            cached_p95: Some(20.0),
+            cached_p99: Some(22.0),
+            cached_mean: Some(14.0),
+            cached_max: Some(30.0),
+            cached_jitter: Some(2.5),
             dnssec: Some(true),
-            timeouts,
-            note,
-            score: match (cached, uncached) {
-                (Some(a), Some(b)) => (a + b) / 2.0,
-                _ => 1.0e9,
-            },
-        }
-    }
-
-    fn sample() -> Vec<Row> {
-        vec![
-            row(
-                "192.168.1.1",
-                "Router/ISP-default",
-                Some(5.04),
-                Some(54.0),
-                0,
-                Note::Ok,
-            ),
-            row("1.1.1.1", "Cloudflare", Some(45.3), Some(66.0), 0, Note::Ok),
-            row(
-                "[2606:4700:4700::1111]:5353",
-                "Cloudflare",
-                Some(46.0),
-                Some(67.0),
-                1,
-                Note::Ok,
-            ),
-            row("9.9.9.9", "Quad9", None, None, 8, Note::Unreliable),
-            row("5.5.5.5", "other", Some(2.0), Some(3.0), 0, Note::Hijacks),
-        ]
-    }
-
-    #[test]
-    fn times_are_formatted_with_one_decimal() {
-        assert_eq!(fmt_ms(Some(5.04)), "   5.0 ms");
-        assert_eq!(fmt_ms(Some(123.456)), " 123.5 ms");
-        assert_eq!(fmt_ms(None), "      n/a");
-    }
-
-    #[test]
-    fn paint_only_adds_codes_when_asked() {
-        assert_eq!(paint("x", "31", false), "x");
-        assert_eq!(paint("x", "31", true), "\x1b[31mx\x1b[0m");
-    }
-
-    #[test]
-    fn the_table_flags_and_marks_the_right_rows() {
-        let current: HashSet<IpAddr> = ["1.1.1.1".parse().unwrap()].into_iter().collect();
-        let text = table(&sample(), &current, false);
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 6);
-        assert!(lines[1].starts_with(" 1. 192.168.1.1"));
-        assert!(lines[2].ends_with("<== current"));
-        assert!(lines[3].contains("[2606:4700:4700::1111]:5353"));
-        assert!(lines[4].contains("n/a") && lines[4].ends_with("UNRELIABLE"));
-        assert!(lines[5].ends_with("HIJACKS-NXDOMAIN"));
-        // the port-5353 IPv6 server is not "current" even though 1.1.1.1 is
-        assert!(!lines[3].contains("current"));
-    }
-
-    #[test]
-    fn details_show_spread_and_dnssec() {
-        let text = details(&sample());
-        assert!(text.contains("min   44.3 ms"));
-        assert!(text.contains("p95   47.3 ms"));
-        assert!(text.contains("jitter    1.5 ms"));
-        assert!(text.contains("DNSSEC yes"));
-        let mut no_dnssec = sample();
-        no_dnssec[1].dnssec = Some(false);
-        assert!(details(&no_dnssec).contains("DNSSEC no"));
-    }
-
-    #[test]
-    fn the_summary_recommends_a_known_provider_and_shows_the_gap() {
-        let current: HashSet<IpAddr> = ["1.1.1.1".parse().unwrap()].into_iter().collect();
-        let text = summary(&sample(), &current, false, 1);
-        assert!(text.contains("Recommended:            1.1.1.1 (Cloudflare) - 55.6 ms average"));
-        assert!(text.contains("Fastest overall:        192.168.1.1 (Router/ISP-default)"));
-        assert!(text.contains("Your current DNS:       #2 (1.1.1.1) of 5 tested"));
-        assert!(text.contains("already the recommended choice"));
-        assert!(text.contains("DNSSEC validation:      3 of 3 healthy servers set the AD bit"));
-        assert!(text.contains("Verdict:                your current DNS is already"));
-    }
-
-    #[test]
-    fn the_summary_explains_how_much_switching_gains() {
-        let rows = vec![
-            row("1.1.1.1", "Cloudflare", Some(20.0), Some(40.0), 0, Note::Ok),
-            row("2.2.2.2", "Other", Some(50.0), Some(70.0), 0, Note::Ok),
-        ];
-        let current: HashSet<IpAddr> = ["2.2.2.2".parse().unwrap()].into_iter().collect();
-        let text = summary(&rows, &current, false, 1);
-        assert!(text.contains("30.0 ms slower per lookup"));
-        assert!(text.contains("switching to 1.1.1.1 would save about 30.0 ms"));
-        let none = summary(&[], &HashSet::new(), false, 1);
-        assert!(none.contains("Recommended:            none"));
-        assert!(!none.contains("Your current DNS"));
-    }
-
-    #[test]
-    fn close_results_get_a_rerun_hint() {
-        let rows = vec![
-            row("1.1.1.1", "Cloudflare", Some(20.0), Some(40.0), 0, Note::Ok),
-            row("8.8.8.8", "Google", Some(20.2), Some(40.2), 0, Note::Ok),
-        ];
-        let text = summary(&rows, &HashSet::new(), false, 1);
-        assert!(text.contains("Close call:"));
-        assert!(text.contains("use --repeat 3"));
-        let settled = summary(&rows, &HashSet::new(), false, 3);
-        assert!(settled.contains("run again at a different time"));
-    }
-
-    #[test]
-    fn a_second_server_from_the_same_provider_is_not_a_close_call() {
-        let rows = vec![
-            row("1.1.1.1", "Cloudflare", Some(20.0), Some(40.0), 0, Note::Ok),
-            row("1.0.0.1", "Cloudflare", Some(20.1), Some(40.1), 0, Note::Ok),
-            row("8.8.8.8", "Google", Some(50.0), Some(70.0), 0, Note::Ok),
-        ];
-        assert!(!summary(&rows, &HashSet::new(), false, 1).contains("Close call:"));
-    }
-
-    fn steering_sample() -> Steering {
-        Steering {
-            host: "github.com".into(),
-            servers: 10,
-            entries: vec![
-                SteerEntry {
-                    ip: "185.199.108.133".parse().unwrap(),
-                    returned_by: 10,
-                    connects: vec![Some(172.0), Some(174.0), Some(171.0)],
-                },
-                SteerEntry {
-                    ip: "185.199.111.133".parse().unwrap(),
-                    returned_by: 9,
-                    connects: vec![None, None, None],
-                },
-                SteerEntry {
-                    ip: "2606:50c0:8000::154".parse().unwrap(),
-                    returned_by: 2,
-                    connects: vec![Some(20.0), None, Some(22.0)],
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn steering_shows_failures_and_intermittent_failures() {
-        // columns are padded to line up, so compare with the spacing collapsed
-        let text = steering_text(&steering_sample())
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(text.contains("185.199.108.133 connect 172 ms"));
-        assert!(text.contains("returned by 10 of 10 servers"));
-        assert!(text.contains("185.199.111.133 connect FAILED"));
-        assert!(text.contains("2606:50c0:8000::154 connect 21 ms (1 of 3 failed)"));
-        let empty = Steering {
-            host: "x.test".into(),
-            servers: 3,
-            entries: vec![],
+            dnssec_bogus: Some(true),
+            timeouts: 0,
+            note: Note::Ok,
+            score: 17.895,
         };
-        assert!(steering_text(&empty).contains("no server returned an address for x.test"));
+        RunResult {
+            protocol: Protocol::Udp,
+            family: Family::Any,
+            duration_secs: 12.5,
+            data_center: Some("MRS".into()),
+            current_dns: vec!["192.168.1.1".parse().unwrap()],
+            rows: vec![row],
+            steerings: vec![Steering {
+                host: "example.com".into(),
+                servers: 1,
+                entries: vec![SteerEntry {
+                    ip: "93.184.216.34".parse().unwrap(),
+                    returned_by: 1,
+                    connects: vec![Some(12.0), None, Some(14.0)],
+                }],
+            }],
+            scanned: 1,
+            tested: 1,
+        }
     }
 
     #[test]
-    fn csv_has_a_header_and_quotes_awkward_names() {
-        let current: HashSet<IpAddr> = ["1.1.1.1".parse().unwrap()].into_iter().collect();
-        let mut rows = sample();
-        rows[1].name = "Cloud,flare".into();
-        let text = csv(&rows, &current);
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 6);
-        assert_eq!(
-            lines[0],
-            "rank,server,name,cached_ms,uncached_ms,min_ms,p95_ms,jitter_ms,timeouts,flag,dnssec,current"
-        );
-        assert!(lines[2].contains("\"Cloud,flare\""));
-        assert!(lines[2].contains(",yes,true"));
-        assert!(lines[5].contains("HIJACKS-NXDOMAIN"));
+    fn json_has_rank_recommendation_and_security() {
+        let text = json(&sample_result());
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(value["results"][0]["rank"], 1);
+        assert_eq!(value["results"][0]["security"], "DNSSEC validated");
+        assert_eq!(value["recommendation"]["name"], "Cloudflare");
+        assert_eq!(value["steering"]["addresses"][0]["returned_by"], 1);
     }
 
     #[test]
-    fn json_escapes_strings() {
-        assert_eq!(jstr("plain"), "\"plain\"");
-        assert_eq!(jstr("a\"b\\c\nd\te\u{1}"), "\"a\\\"b\\\\c\\nd\\te\\u0001\"");
-        assert_eq!(jnum(Some(1.26)), "1.3");
-        assert_eq!(jnum(None), "null");
-        assert_eq!(jnum(Some(f64::NAN)), "null");
-        assert_eq!(jbool(Some(true)), "true");
-        assert_eq!(jbool(None), "null");
+    fn csv_quotes_commas_and_quotes() {
+        let mut result = sample_result();
+        result.rows[0].label = "A, \"quoted\" resolver".into();
+        let text = csv(&result);
+        assert!(text.starts_with("rank,provider,name"));
+        assert!(text.contains("\"A, \"\"quoted\"\" resolver\""));
+        assert!(text.contains("17.895"));
     }
 
     #[test]
-    fn json_is_shaped_as_documented() {
-        let current: HashSet<IpAddr> = ["1.1.1.1".parse().unwrap()].into_iter().collect();
-        let text = json(
-            "0.5.0",
-            Some("mrs04"),
-            &sample(),
-            &current,
-            &[steering_sample()],
-        );
-        assert!(text.starts_with("{\n  \"dnsrace\": \"0.5.0\""));
-        assert!(text.contains("\"data_center\": \"mrs04\""));
-        assert!(text.contains("\"rank\": 1, \"server\": \"192.168.1.1\""));
-        assert!(text.contains("\"flag\": \"UNRELIABLE\""));
-        assert!(text.contains("\"dnssec\": true"));
-        assert!(text.contains("\"current\": true"));
-        assert!(text.contains("\"recommended\": \"1.1.1.1\""));
-        assert!(text.contains("\"fastest_known\": \"1.1.1.1\""));
-        assert!(text.contains("\"connect_ms\": null, \"failed\": 3"));
-        assert!(text.contains("\"steering\": {\n    \"host\": \"github.com\""));
-        assert!(text.contains("\"steerings\": [\n    {\n    \"host\": \"github.com\""));
-        let bare = json("0.5.0", None, &[], &HashSet::new(), &[]);
-        assert!(bare.contains("\"data_center\": null"));
-        assert!(bare.contains("\"steering\": null"));
-        assert!(bare.contains("\"steerings\": []"));
-        assert!(bare.contains("\"recommended\": null"));
-        assert!(bare.contains("\"fastest\": null"));
+    fn html_escapes_every_user_visible_value() {
+        let mut result = sample_result();
+        result.rows[0].label = "<script>alert(1)</script>".into();
+        result.rows[0].endpoint = "1.1.1.1&x".into();
+        let text = html(&result);
+        assert!(!text.contains("<script>alert(1)</script>"));
+        assert!(text.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(text.contains("1.1.1.1&amp;x"));
+        assert!(text.contains("DNSSEC validated"));
     }
 
     #[test]
-    fn html_includes_steering_and_escapes_hostnames() {
-        let current: HashSet<IpAddr> = ["1.1.1.1".parse().unwrap()].into_iter().collect();
-        let mut steering = steering_sample();
-        steering.host = "example.test<script>".into();
-        let text = html("0.5.0", None, &sample(), &current, &[steering]);
-        assert!(text.contains("<h2>Steering</h2>"));
-        assert!(text.contains("example.test&lt;script&gt;"));
-        assert!(!text.contains("example.test<script>"));
-        assert!(text.contains("185.199.108.133"));
+    fn summary_mentions_the_winner_and_security() {
+        let text = summary_text(&sample_result());
+        assert!(text.contains("Fastest: Cloudflare"));
+        assert!(text.contains("DNSSEC validated"));
+        assert!(text.contains("Address: 1.1.1.1"));
+    }
+
+    #[test]
+    fn empty_results_are_handled_without_panicking() {
+        let mut result = sample_result();
+        result.rows.clear();
+        assert!(json(&result).contains("\"recommendation\": null"));
+        assert!(csv(&result).lines().count() == 1);
+        assert!(html(&result).contains("No recommendation"));
+        assert!(summary_text(&result).contains("No recommendable"));
+    }
+
+    #[test]
+    fn ms_formatting() {
+        assert_eq!(fmt_ms(Some(12.34)), "12.3 ms");
+        assert_eq!(fmt_ms(None), "—");
     }
 }

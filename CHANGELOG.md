@@ -4,6 +4,77 @@ All notable changes to dnsrace are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-10-24
+
+### Added
+
+- **A GUI-only desktop application.** The window is now the product: server picker, protocol and
+  address-family filters, search, categories, default selection, live progress, sortable results,
+  recommendation, apply/revert, history, settings and themes. There is no terminal or CLI mode.
+- **Test all and Test selected.** Run the whole current catalogue or only the checked resolvers.
+  The quick scan finds responders first; every responder is then fully tested.
+- **DNS-over-TLS (DoT)** on port 853, including endpoints that only publish HTTP/2 DoH services.
+- **Expanded DNS-over-HTTPS (DoH) catalogue**, using RFC 8484 wire-format queries. Providers include
+  Cloudflare, Google, Quad9, AdGuard, CleanBrowsing, OpenDNS, DNS.SB, Control D and others.
+- **DNS security checks** for DNSSEC validation and deliberately broken signatures. A resolver
+  that accepts a bogus DNSSEC answer is shown as **Bogus accepted**, is never recommended, and is
+  blocked from being applied.
+- **System DNS apply/revert** on Linux (NetworkManager or systemd-resolved), Windows (PowerShell
+  with UAC) and macOS (`networksetup` with the administrator prompt). The previous configuration
+  is saved in `applied.json` before the change and can be restored from the app.
+- **Run history** of the last 20 runs, with reopen and export as JSON, CSV or HTML.
+- **Custom resolvers** for plain DNS, DoT and DoH, including an optional fixed IP for DoT.
+- **Steering checks** for one or more hostnames, with returned addresses and TCP connect attempts.
+- **Persistent settings** for protocol, family, timeout, jobs, rounds, selected servers, custom
+  resolvers, steering hostnames, export folder and theme.
+- **AppImage packaging** for Linux x86_64 and aarch64, with desktop entry, scalable icon and
+  AppStream metadata.
+- **GUI-only CI and release workflows** that build AppImages, Windows archives and macOS app
+  bundles and publish combined SHA-256 checksums.
+
+### Changed
+
+- **The binary always opens the GUI.** `src/main.rs` only starts `dnsrace::gui::run()`.
+- **The benchmark engine is now library code** shared by the GUI and the integration tests, with
+  progress events, incremental rows and cancellation.
+- **Apply is restricted to plain port-53 resolvers.** DoT/DoH results remain benchmark-only, and
+  custom non-53 ports are never applied.
+- **Windows release builds use the GUI subsystem**, so no console window appears behind the app.
+- **rustls now uses the `ring` provider only**, avoiding the ambiguous dual-provider configuration
+  that would panic when opening the first DoT connection.
+- **The app ID is `io.github.yousef_mohamed22.dnsrace`** for the desktop entry, AppStream metadata
+  and AppImage.
+- **Rust 1.99 / edition 2024** remain the minimum and edition.
+
+### Removed
+
+- The CLI argument parser, terminal tables, ANSI colours and every CLI-only flag.
+- The `gui` Cargo feature, `--gui`, `--json`, `--csv`, `--quiet`, `--verbose`, `--export-*`,
+  `--doh`, `--tcp`, `--nearby`, `--countries`, `--servers`, `--add`, `--top`, `--repeat`,
+  `--no-detect`, `--no-color` and the old `--features gui` build mode.
+- The old `src/app.rs` and `src/cli.rs` entry points.
+
+### Fixed
+
+- **A custom resolver on a non-53 port could be applied** by falling back to its IP address even
+  though the port was not 53. It is now rejected.
+- **Windows revert did not clear an applied IPv6 resolver** when the adapter originally had no
+  static IPv6 DNS servers. Revert now resets both families and restores the saved values.
+- **Windows builds referenced a Unix-only helper** when choosing PowerShell; the command lookup is
+  now implemented for Windows as well.
+- **The history window reopened after loading a run** because its close state was overwritten.
+- **The results table overflowed the right edge** at smaller window widths. Columns adapt to the
+  available width, and the Use button remains visible.
+- **DNSSEC labels in reports and the GUI** now consistently use the same security vocabulary.
+
+### Verified
+
+- 83 unit tests and 9 engine integration tests pass on Rust 1.99.1.
+- `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings` are clean.
+- DoH and DoT were exercised against Cloudflare from the development machine.
+- The x86_64 AppImage was built locally, extracted, validated with `desktop-file-validate` and
+  `appstreamcli`, and launched successfully in a graphical session.
+
 ## [0.5.0] - 2026-10-22
 
 ### Added
@@ -141,5 +212,7 @@ All notable changes to dnsrace are listed here. The format follows
 - Hostname steering check with TCP connect times.
 - Cross-platform CI and release workflows.
 
+[0.6.0]: https://github.com/Yousef-Mohamed22/dnsrace/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/Yousef-Mohamed22/dnsrace/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Yousef-Mohamed22/dnsrace/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Yousef-Mohamed22/dnsrace/releases/tag/v0.3.0

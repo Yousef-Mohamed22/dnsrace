@@ -1,6 +1,13 @@
-//! Just enough of the DNS wire format to time A, AAAA and TXT lookups over UDP.
+//! DNS wire format and the transports dnsrace can measure: UDP, TCP, DNS-over-TLS and
+//! DNS-over-HTTPS.
+//!
+//! Everything here is deliberately small: dnsrace builds its own queries and parses only the
+//! records it needs. That keeps the desktop app self-contained and makes the measurements easy
+//! to reason about.
 
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
@@ -65,7 +72,7 @@ fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
 }
 
 /// What we need from a reply.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Parsed {
     pub rcode: u8,
     pub answers: usize,
@@ -73,6 +80,8 @@ pub struct Parsed {
     pub txt: Option<String>,
     /// The Authenticated Data bit: the server says it validated the answer with DNSSEC.
     pub ad: bool,
+    /// The reply was truncated and should be retried over TCP.
+    pub tc: bool,
 }
 
 /// Parses a reply. Returns `None` for anything that is not a well-formed response with the
@@ -132,11 +141,12 @@ pub fn parse_reply(buf: &[u8], id: u16) -> Option<Parsed> {
         addrs,
         txt,
         ad: flags & 0x0020 != 0,
+        tc: flags & 0x0200 != 0,
     })
 }
 
 /// A reply together with how long it took.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Reply {
     pub rtt: Duration,
     pub rcode: u8,
@@ -145,6 +155,30 @@ pub struct Reply {
     pub txt: Option<String>,
     /// The server set the DNSSEC Authenticated Data bit.
     pub ad: bool,
+    /// The reply was truncated (UDP only).
+    pub tc: bool,
+}
+
+impl From<Parsed> for Reply {
+    fn from(p: Parsed) -> Self {
+        Reply {
+            rtt: Duration::ZERO,
+            rcode: p.rcode,
+            answers: p.answers,
+            addrs: p.addrs,
+            txt: p.txt,
+            ad: p.ad,
+            tc: p.tc,
+        }
+    }
+}
+
+fn local_bind(server: SocketAddr) -> SocketAddr {
+    if server.is_ipv4() {
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
+    }
 }
 
 /// One UDP lookup. Returns `None` on timeout or network error. The round-trip time runs from
@@ -168,33 +202,23 @@ pub async fn query_ext(
     wait: Duration,
     dnssec: bool,
 ) -> Option<Reply> {
-    let local = if server.is_ipv4() {
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-    } else {
-        SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
-    };
-    let sock = UdpSocket::bind(local).await.ok()?;
+    let sock = UdpSocket::bind(local_bind(server)).await.ok()?;
     sock.connect(server).await.ok()?;
     let id = (rand64() & 0xFFFF) as u16;
     let packet = build_query_ext(id, name, qtype, qclass, dnssec);
     let start = Instant::now();
     sock.send(&packet).await.ok()?;
     let deadline = start + wait;
-    let mut buf = [0u8; 1500];
+    let mut buf = [0u8; 4096];
     loop {
         let left = deadline.checked_duration_since(Instant::now())?;
         match timeout(left, sock.recv(&mut buf)).await {
             Ok(Ok(n)) => {
                 let rtt = start.elapsed();
                 if let Some(p) = parse_reply(&buf[..n], id) {
-                    return Some(Reply {
-                        rtt,
-                        rcode: p.rcode,
-                        answers: p.answers,
-                        addrs: p.addrs,
-                        txt: p.txt,
-                        ad: p.ad,
-                    });
+                    let mut reply: Reply = p.into();
+                    reply.rtt = rtt;
+                    return Some(reply);
                 }
                 // a stray or mismatched packet: keep waiting for the real reply
             }
@@ -203,71 +227,59 @@ pub async fn query_ext(
     }
 }
 
-/// DNS-over-HTTPS providers built into dnsrace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DohProvider {
-    Cloudflare,
-    Google,
-}
-
-impl DohProvider {
-    pub const fn url(self) -> &'static str {
-        match self {
-            DohProvider::Cloudflare => "https://cloudflare-dns.com/dns-query",
-            DohProvider::Google => "https://dns.google/dns-query",
-        }
-    }
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            DohProvider::Cloudflare => "Cloudflare DoH",
-            DohProvider::Google => "Google DoH",
-        }
-    }
-
-    pub const fn all() -> [DohProvider; 2] {
-        [DohProvider::Cloudflare, DohProvider::Google]
-    }
-}
-
-/// One DNS-over-HTTPS result.
-#[derive(Clone, Debug)]
-pub struct DohReply {
-    pub rtt: Duration,
-    pub status: u32,
-    pub answers: usize,
-}
-
-/// Queries a DNS-over-HTTPS endpoint with a standard A record for `name`.
-pub async fn doh_query(provider: DohProvider, name: &str, wait: Duration) -> Option<DohReply> {
-    // dns.google and cloudflare-dns.com expect the DNS wire message as base64url
-    let id = (rand64() & 0xFFFF) as u16;
-    let packet = build_query_ext(id, name, TYPE_A, CLASS_IN, true);
-    let b64 = base64url_encode(&packet);
-
-    let url = format!("{}?dns={}", provider.url(), b64);
-    let start = Instant::now();
-    let body = ureq::get(&url)
-        .set("Accept", "application/dns-json")
-        .set("User-Agent", concat!("dnsrace/", env!("CARGO_PKG_VERSION")))
-        .timeout(wait)
-        .call()
-        .ok()?
-        .into_string()
-        .ok()?;
-    let rtt = start.elapsed();
-
-    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let status = v["Status"].as_u64().unwrap_or(u64::MAX) as u32;
-    let answers = v["Answer"].as_array().map(|a| a.len()).unwrap_or(0);
-    Some(DohReply {
-        rtt,
-        status,
-        answers,
+/// DNS-over-HTTPS client. Shared so TLS connections and the HTTP connection pool are reused
+/// across measurements.
+fn http_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .redirects(0)
+            .user_agent(concat!("dnsrace/", env!("CARGO_PKG_VERSION")))
+            .build()
     })
 }
 
-/// Encodes bytes as base64url (no padding) for use in a DoH GET parameter.
+/// One DNS-over-HTTPS lookup using RFC 8484 wire format (GET + `application/dns-message`).
+///
+/// Returns `None` for HTTP errors, invalid responses and timeouts. The request runs on a
+/// blocking thread because `ureq` is synchronous; this keeps it out of the async workers.
+pub async fn doh_query(url: &str, name: &str, wait: Duration) -> Option<Reply> {
+    let url = url.to_string();
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || doh_query_blocking(&url, &name, wait))
+        .await
+        .ok()?
+}
+
+fn doh_query_blocking(url: &str, name: &str, wait: Duration) -> Option<Reply> {
+    // RFC 8484 recommends a message ID of 0 for cache friendliness.
+    let packet = build_query_ext(0, name, TYPE_A, CLASS_IN, true);
+    let encoded = base64url_encode(&packet);
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let request_url = format!("{url}{separator}dns={encoded}");
+    let start = Instant::now();
+    let response = http_agent()
+        .get(&request_url)
+        .set("Accept", "application/dns-message")
+        .timeout(wait)
+        .call()
+        .ok()?;
+    if let Some(content_type) = response.header("content-type")
+        && !content_type
+            .to_ascii_lowercase()
+            .starts_with("application/dns-message")
+    {
+        return None;
+    }
+    let mut body = Vec::with_capacity(512);
+    response.into_reader().read_to_end(&mut body).ok()?;
+    let rtt = start.elapsed();
+    let mut reply: Reply = parse_reply(&body, 0)?.into();
+    reply.rtt = rtt;
+    Some(reply)
+}
+
+/// Encodes bytes as base64url without padding, as required by RFC 8484.
 fn base64url_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -281,27 +293,19 @@ fn base64url_encode(input: &[u8]) -> String {
         out.push(ALPHABET[(((b1 & 0x0F) << 2) | (b2 >> 6)) as usize] as char);
         out.push(ALPHABET[(b2 & 0x3F) as usize] as char);
     }
-    if !rem.is_empty() {
-        match rem.len() {
-            1 => {
-                let b0 = rem[0];
-                out.push(ALPHABET[(b0 >> 2) as usize] as char);
-                out.push(ALPHABET[((b0 & 0x03) << 4) as usize] as char);
-                out.push('=');
-                out.push('=');
-            }
-            2 => {
-                let b0 = rem[0];
-                let b1 = rem[1];
-                out.push(ALPHABET[(b0 >> 2) as usize] as char);
-                out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-                out.push(ALPHABET[((b1 & 0x0F) << 2) as usize] as char);
-                out.push('=');
-            }
-            _ => {}
+    match rem {
+        [b0] => {
+            out.push(ALPHABET[(b0 >> 2) as usize] as char);
+            out.push(ALPHABET[((b0 & 0x03) << 4) as usize] as char);
         }
+        [b0, b1] => {
+            out.push(ALPHABET[(b0 >> 2) as usize] as char);
+            out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+            out.push(ALPHABET[((b1 & 0x0F) << 2) as usize] as char);
+        }
+        _ => {}
     }
-    out.trim_end_matches('=').to_string()
+    out
 }
 
 /// Queries a server over TCP instead of UDP. Returns the reply and round-trip time.
@@ -312,45 +316,148 @@ pub async fn query_tcp(
     qclass: u16,
     wait: Duration,
 ) -> Option<Reply> {
-    let stream = match timeout(wait, TcpStream::connect(server)).await {
-        Ok(Ok(s)) => s,
-        _ => return None,
-    };
+    query_tcp_ext(server, name, qtype, qclass, wait, false).await
+}
+
+/// Like [`query_tcp`], but with an optional DNSSEC (DO bit) request.
+pub async fn query_tcp_ext(
+    server: SocketAddr,
+    name: &str,
+    qtype: u16,
+    qclass: u16,
+    wait: Duration,
+    dnssec: bool,
+) -> Option<Reply> {
+    let deadline = Instant::now() + wait;
+    let stream = timeout(wait, TcpStream::connect(server)).await.ok()?.ok()?;
     let id = (rand64() & 0xFFFF) as u16;
-    let packet = build_query_ext(id, name, qtype, qclass, false);
+    let packet = build_query_ext(id, name, qtype, qclass, dnssec);
     // TCP DNS prefixes each message with a 2-byte big-endian length.
-    let len = (packet.len() as u16).to_be_bytes();
     let mut framed = Vec::with_capacity(packet.len() + 2);
-    framed.extend_from_slice(&len);
+    framed.extend_from_slice(&(packet.len() as u16).to_be_bytes());
     framed.extend_from_slice(&packet);
 
+    let left = deadline.checked_duration_since(Instant::now())?;
     let start = Instant::now();
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (mut rd, mut wr) = stream.into_split();
-    wr.write_all(&framed).await.ok()?;
-    let _ = wr.shutdown().await;
-
-    let mut len_buf = [0u8; 2];
-    rd.read_exact(&mut len_buf).await.ok()?;
-    let msg_len = u16::from_be_bytes([len_buf[0], len_buf[1]]) as usize;
-    let mut buf = vec![0u8; msg_len.min(65535)];
-    rd.read_exact(&mut buf).await.ok()?;
+    let exchange = async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut rd, mut wr) = stream.into_split();
+        wr.write_all(&framed).await.ok()?;
+        let _ = wr.shutdown().await;
+        let mut len_buf = [0u8; 2];
+        rd.read_exact(&mut len_buf).await.ok()?;
+        let msg_len = u16::from_be_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; msg_len];
+        rd.read_exact(&mut buf).await.ok()?;
+        Some(buf)
+    };
+    let buf = timeout(left, exchange).await.ok()??;
     let rtt = start.elapsed();
+    let mut reply: Reply = parse_reply(&buf, id)?.into();
+    reply.rtt = rtt;
+    Some(reply)
+}
 
-    let p = parse_reply(&buf, id)?;
-    Some(Reply {
-        rtt,
-        rcode: p.rcode,
-        answers: p.answers,
-        addrs: p.addrs,
-        txt: p.txt,
-        ad: p.ad,
-    })
+// ---------------------------------------------------------------------------------------
+// DNS-over-TLS
+// ---------------------------------------------------------------------------------------
+
+fn tls_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            if let Ok(certs) = rustls_native_certs::load_native_certs() {
+                for cert in certs {
+                    let _ = roots.add(cert);
+                }
+            }
+            if roots.is_empty() {
+                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            }
+            Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            )
+        })
+        .clone()
+}
+
+/// One DNS-over-TLS lookup on port 853 (or `port`). `server` may be omitted for a custom
+/// hostname, in which case it is resolved with the system resolver first.
+///
+/// The measured round-trip time starts after the TLS handshake, so it measures the DNS query
+/// rather than the certificate exchange.
+#[allow(clippy::too_many_arguments)]
+pub async fn query_dot(
+    server: Option<SocketAddr>,
+    host: &str,
+    port: u16,
+    name: &str,
+    qtype: u16,
+    qclass: u16,
+    wait: Duration,
+    dnssec: bool,
+) -> Option<Reply> {
+    let deadline = Instant::now() + wait;
+    let addr = match server {
+        Some(addr) => addr,
+        None => {
+            let lookup = format!("{host}:{port}");
+            timeout(wait, tokio::net::lookup_host(lookup))
+                .await
+                .ok()?
+                .ok()?
+                .next()?
+        }
+    };
+    let tcp = timeout(wait, TcpStream::connect(addr)).await.ok()?.ok()?;
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).ok()?;
+    let connector = tokio_rustls::TlsConnector::from(tls_config());
+    let left = deadline.checked_duration_since(Instant::now())?;
+    let mut stream = timeout(left, connector.connect(server_name, tcp))
+        .await
+        .ok()?
+        .ok()?;
+
+    let id = (rand64() & 0xFFFF) as u16;
+    let packet = build_query_ext(id, name, qtype, qclass, dnssec);
+    let mut framed = Vec::with_capacity(packet.len() + 2);
+    framed.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+    framed.extend_from_slice(&packet);
+
+    let left = deadline.checked_duration_since(Instant::now())?;
+    let start = Instant::now();
+    let exchange = async {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        stream.write_all(&framed).await.ok()?;
+        let mut len_buf = [0u8; 2];
+        stream.read_exact(&mut len_buf).await.ok()?;
+        let msg_len = u16::from_be_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; msg_len];
+        stream.read_exact(&mut buf).await.ok()?;
+        Some(buf)
+    };
+    let buf = timeout(left, exchange).await.ok()??;
+    let rtt = start.elapsed();
+    let mut reply: Reply = parse_reply(&buf, id)?.into();
+    reply.rtt = rtt;
+    Some(reply)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn builds_a_tls_configuration() {
+        // Exactly one rustls crypto provider must be enabled. With both aws-lc and ring enabled,
+        // ClientConfig::builder() panics at the first DoT connection.
+        let config = tls_config();
+        assert!(!config.alpn_protocols.iter().any(|p| p.is_empty()));
+    }
 
     #[test]
     fn builds_a_valid_query() {
@@ -460,9 +567,14 @@ mod tests {
     }
 
     #[test]
-    fn reads_response_codes() {
+    fn reads_response_codes_and_the_truncation_bit() {
         let r = reply_with(9, TYPE_A, CLASS_IN, 3, &[]);
-        assert_eq!(parse_reply(&r, 9).expect("valid").rcode, 3);
+        let p = parse_reply(&r, 9).expect("valid");
+        assert_eq!(p.rcode, 3);
+        assert!(!p.tc);
+        let mut tc = r;
+        tc[2] |= 0x02;
+        assert!(parse_reply(&tc, 9).expect("valid").tc);
     }
 
     #[test]
@@ -490,6 +602,19 @@ mod tests {
             parse_reply(&r, 5).expect("valid").txt.as_deref(),
             Some("mrs04")
         );
+    }
+
+    #[test]
+    fn base64url_has_no_padding() {
+        assert_eq!(base64url_encode(b"f"), "Zg");
+        assert_eq!(base64url_encode(b"fo"), "Zm8");
+        assert_eq!(base64url_encode(b"foo"), "Zm9v");
+        assert_eq!(base64url_encode(b"foobar"), "Zm9vYmFy");
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(base64url_encode(&[0, 255, 16, 42, 7]))
+            .unwrap();
+        assert_eq!(decoded, vec![0, 255, 16, 42, 7]);
     }
 
     #[tokio::test]
@@ -562,6 +687,112 @@ mod tests {
         .await;
         assert!(r.is_none());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn tcp_reads_are_bounded_by_the_timeout() {
+        // Accept the connection, read the query, then never answer. The old implementation
+        // waited forever here.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let started = Instant::now();
+        let r = query_tcp(
+            addr,
+            "example.com",
+            TYPE_A,
+            CLASS_IN,
+            Duration::from_millis(250),
+        )
+        .await;
+        assert!(r.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn queries_a_local_doh_server_with_wire_format() {
+        use base64::Engine;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&request);
+            let path = text
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .expect("request path");
+            assert!(path.contains("dns="));
+            assert!(text.contains("Accept: application/dns-message"));
+            let encoded = path.split("dns=").nth(1).unwrap();
+            let query = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .unwrap();
+            let id = u16::from_be_bytes([query[0], query[1]]);
+            assert_eq!(id, 0);
+            let reply = reply_with(
+                id,
+                TYPE_A,
+                CLASS_IN,
+                0,
+                &[record(TYPE_A, CLASS_IN, &[9, 9, 9, 9])],
+            );
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                reply.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(&reply).await.unwrap();
+        });
+
+        let url = format!("http://{addr}/dns-query");
+        let r = doh_query(&url, "example.com", Duration::from_secs(2))
+            .await
+            .expect("a DoH reply");
+        assert_eq!(r.addrs, vec![IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))]);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn doh_rejects_a_non_dns_content_type() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let body = b"<html>not dns</html>";
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let url = format!("http://{addr}/dns-query");
+        assert!(
+            doh_query(&url, "example.com", Duration::from_secs(2))
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

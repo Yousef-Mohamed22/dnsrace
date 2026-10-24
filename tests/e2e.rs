@@ -1,30 +1,52 @@
-//! End-to-end tests: run the real binary against simulated DNS servers on loopback.
+//! Integration tests for the engine. They exercise the same pipeline as the desktop app against
+//! simulated DNS servers on loopback, without opening a window or launching a terminal binary.
 
 mod common;
 
-use common::{Behavior, TempFile, closed_udp_port, line_with, position, run_dnsrace, spawn_mock};
-use tokio::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
-/// A TCP listener that accepts and drops connections, standing in for a web server.
-async fn tcp_stub() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(async move {
-        loop {
-            let _ = listener.accept().await;
-        }
-    });
-    port
+use common::{
+    Behavior, closed_udp_port, mock_candidate, run_engine, run_engine_cancelled, sample_row,
+    spawn_mock, spawn_tcp_mock, tcp_stub,
+};
+use dnsrace::bench::{Note, SecurityStatus};
+use dnsrace::engine::{self, RunEvent, RunRequest, Stage};
+use dnsrace::report;
+use dnsrace::servers::{Candidate, Family, Protocol};
+
+fn request(candidates: Vec<Candidate>, protocol: Protocol, wait_ms: u64) -> RunRequest {
+    RunRequest {
+        candidates,
+        protocol,
+        family: Family::Any,
+        wait: Duration::from_millis(wait_ms),
+        jobs: 4,
+        repeat: 1,
+        hostnames: Vec::new(),
+        connect_port: 443,
+        include_system: false,
+        include_nearby: false,
+    }
+}
+
+fn find<'a>(result: &'a dnsrace::engine::RunResult, label: &str) -> &'a dnsrace::bench::Row {
+    result
+        .rows
+        .iter()
+        .find(|row| row.label == label)
+        .unwrap_or_else(|| panic!("no row for {label}: {:#?}", result.rows))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ranks_flags_and_steers() {
-    let fast = spawn_mock("127.0.0.1:0", Behavior::new(2, 40))
+    let fast = spawn_mock("127.0.0.1:0", Behavior::new(2, 40).validated())
         .await
-        .expect("bind");
-    let mid = spawn_mock("127.0.0.1:0", Behavior::new(120, 160))
+        .expect("bind fast");
+    let mid = spawn_mock("127.0.0.1:0", Behavior::new(30, 60))
         .await
-        .expect("bind");
+        .expect("bind mid");
     let hijacker = spawn_mock(
         "127.0.0.1:0",
         Behavior {
@@ -33,7 +55,7 @@ async fn ranks_flags_and_steers() {
         },
     )
     .await
-    .expect("bind");
+    .expect("bind hijacker");
     let silent = spawn_mock(
         "127.0.0.1:0",
         Behavior {
@@ -42,442 +64,261 @@ async fn ranks_flags_and_steers() {
         },
     )
     .await
-    .expect("bind");
+    .expect("bind silent");
     let dead_port = closed_udp_port().await;
-    let tcp_port = tcp_stub().await.to_string();
-    let list = TempFile::with(&format!(
-        "{} Fast\n{} Mid\n{} Hijacker\n{} Silent\n127.0.0.1:{dead_port} Dead\n",
-        fast.addr, mid.addr, hijacker.addr, silent.addr
-    ));
+    let tcp_port = tcp_stub().await;
 
-    let out = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--no-color",
-        "--timeout",
-        "600",
-        "--connect-port",
-        &tcp_port,
-        "steer.test",
-        "steer2.test",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    let text = &out.stdout;
+    let candidates = vec![
+        mock_candidate(&fast, "Fast", "Fast"),
+        mock_candidate(&mid, "Mid", "Mid"),
+        mock_candidate(&hijacker, "Hijacker", "Hijacker"),
+        mock_candidate(&silent, "Silent", "Silent"),
+        Candidate::plain(
+            format!("127.0.0.1:{dead_port}").parse().expect("addr"),
+            "Dead",
+            "Dead",
+        ),
+    ];
+    let mut request = request(candidates, Protocol::Udp, 200);
+    request.hostnames = vec!["steer.test".into(), "steer2.test".into()];
+    request.connect_port = tcp_port;
+    let (result, events) = run_engine(request);
+    let result = result.expect("the run should finish");
 
-    assert!(
-        text.contains("Stage 1: quick scan of 5 candidates..."),
-        "{text}"
-    );
-    assert!(text.contains("4 answered."), "{text}"); // the dead port never answers
-    assert!(!text.contains("Dead"), "{text}");
+    assert_eq!(result.scanned, 5);
+    assert_eq!(result.tested, 4);
+    assert_eq!(result.rows.len(), 4);
+    assert!(!result.rows.iter().any(|row| row.label == "Dead"));
 
-    // ranking: fast, then mid, then the flagged servers
-    let fast_at = position(text, " Fast ");
-    let mid_at = position(text, " Mid ");
-    let hijacker_at = position(text, " Hijacker ");
-    let silent_at = position(text, " Silent ");
-    assert!(
-        fast_at < mid_at && mid_at < hijacker_at && hijacker_at < silent_at,
-        "unexpected order:\n{text}"
-    );
-    assert!(line_with(text, " Hijacker ").ends_with("HIJACKS-NXDOMAIN"));
-    assert!(line_with(text, " Silent ").ends_with("UNRELIABLE"));
-    assert!(!line_with(text, " Fast ").contains("HIJACKS"));
+    let fast_row = find(&result, "Fast");
+    let mid_row = find(&result, "Mid");
+    let hijacker_row = find(&result, "Hijacker");
+    let silent_row = find(&result, "Silent");
 
-    // the summary only recommends healthy servers
-    assert!(
-        text.contains(&format!("Recommended:            {} (Fast)", fast.addr)),
-        "{text}"
-    );
-    assert!(!text.contains("Hijacker)"), "{text}");
-    assert!(!text.contains("Silent)"), "{text}");
+    assert!(fast_row.score < mid_row.score);
+    assert!(mid_row.score < hijacker_row.score);
+    assert!(hijacker_row.score < silent_row.score);
+    assert_eq!(fast_row.security_status(), SecurityStatus::Validated);
+    assert_eq!(hijacker_row.note, Note::Hijacks);
+    assert_eq!(silent_row.note, Note::Unreliable);
+    assert_eq!(result.best().map(|row| row.label.as_str()), Some("Fast"));
 
-    // the steering check: both healthy servers return 127.0.0.1, and we can connect to it
-    assert!(text.contains("== steer.test:"), "{text}");
-    let steer = line_with(text, "returned by");
-    assert!(steer.starts_with("127.0.0.1"), "{steer}");
+    // The live event stream should include one row per server and end with Finished.
+    let row_events = events
+        .iter()
+        .filter(|event| matches!(event, RunEvent::Row(_)))
+        .count();
+    assert_eq!(row_events, 4);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunEvent::Stage {
+            stage: Stage::Test,
+            total: 4,
+            ..
+        }
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RunEvent::Stage {
+            stage: Stage::Done,
+            ..
+        }
+    )));
     assert!(
-        steer.contains(" ms") && !steer.contains("FAILED"),
-        "{steer}"
+        events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Finished(_)))
     );
-    assert!(steer.contains("returned by 2 of 2 servers"), "{steer}");
-    assert!(text.contains("== steer2.test:"), "{text}");
-    assert!(
-        position(text, "== steer.test:") < position(text, "== steer2.test:"),
-        "{text}"
-    );
+
+    // Only the healthy plain rows are used for steering. Both return 127.0.0.1 and the TCP
+    // stub accepts the connection on the chosen port.
+    assert_eq!(result.steerings.len(), 2);
+    for steering in &result.steerings {
+        assert_eq!(steering.servers, 2);
+        assert!(steering.host == "steer.test" || steering.host == "steer2.test");
+        let entry = steering
+            .entries
+            .iter()
+            .find(|entry| entry.ip.to_string() == "127.0.0.1")
+            .expect("localhost steering address");
+        assert_eq!(entry.returned_by, 2);
+        assert_eq!(entry.connects.len(), 3);
+        assert!(entry.connects.iter().all(Option::is_some));
+    }
+    assert_eq!(result.steerings[0].host, "steer.test");
+    assert_eq!(result.steerings[1].host, "steer2.test");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn json_output_is_valid_and_stdout_is_only_json() {
-    let fast = spawn_mock("127.0.0.1:0", Behavior::new(2, 40))
+async fn a_bogus_dnssec_answer_is_never_recommended() {
+    let bogus = spawn_mock(
+        "127.0.0.1:0",
+        Behavior::new(1, 2).validated().accepts_bogus(),
+    )
+    .await
+    .expect("bind bogus");
+    let good = spawn_mock("127.0.0.1:0", Behavior::new(30, 40).validated())
         .await
-        .expect("bind");
-    let mid = spawn_mock("127.0.0.1:0", Behavior::new(120, 160))
-        .await
-        .expect("bind");
-    let list = TempFile::with(&format!("{} Fast\n{} Mid\n", fast.addr, mid.addr));
+        .expect("bind good");
 
-    let out = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--json",
-        "--timeout",
-        "500",
-        "steer.test",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    let v: serde_json::Value = serde_json::from_str(&out.stdout)
-        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}", out.stdout));
-
-    assert_eq!(v["dnsrace"], env!("CARGO_PKG_VERSION"));
-    assert!(v["data_center"].is_null());
-    let results = v["results"].as_array().expect("a results array");
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0]["rank"], 1);
-    assert_eq!(results[0]["name"], "Fast");
-    assert_eq!(results[0]["server"], fast.addr.to_string());
-    assert!(results[0]["flag"].is_null());
-    assert_eq!(results[0]["current"], false);
-    assert_eq!(results[0]["timeouts"], 0);
-    assert_eq!(results[0]["dnssec"], false);
-    assert!(results[0]["min_ms"].as_f64().is_some());
-    assert!(results[0]["p95_ms"].as_f64().is_some());
-    assert!(results[0]["jitter_ms"].as_f64().is_some());
-    assert!(results[0]["cached_ms"].as_f64().unwrap() < results[1]["cached_ms"].as_f64().unwrap());
-    assert_eq!(v["recommended"], fast.addr.to_string());
-    assert_eq!(v["fastest"], fast.addr.to_string());
-    assert_eq!(v["fastest_known"], fast.addr.to_string());
-    assert_eq!(v["steering"]["host"], "steer.test");
-    assert_eq!(v["steerings"].as_array().unwrap().len(), 1);
-    assert_eq!(v["steerings"][0]["host"], "steer.test");
-
-    // progress text stays out of the JSON stream
-    assert!(out.stderr.contains("Stage 1:"), "{}", out.stderr);
-    assert!(!out.stdout.contains("Stage 1:"));
+    let request = request(
+        vec![
+            mock_candidate(&bogus, "Bogus", "Bogus"),
+            mock_candidate(&good, "Good", "Good"),
+        ],
+        Protocol::Udp,
+        200,
+    );
+    let (result, _) = run_engine(request);
+    let result = result.expect("the run should finish");
+    let bogus_row = find(&result, "Bogus");
+    let good_row = find(&result, "Good");
+    assert_eq!(bogus_row.security_status(), SecurityStatus::BogusAccepted);
+    assert!(!bogus_row.recommendable());
+    assert!(good_row.recommendable());
+    assert!(bogus_row.score < good_row.score);
+    assert_eq!(result.best().map(|row| row.label.as_str()), Some("Good"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn exports_write_json_csv_and_html_reports() {
-    let fast = spawn_mock("127.0.0.1:0", Behavior::new(2, 40))
+async fn exports_include_results_and_steering() {
+    let mock = spawn_mock("127.0.0.1:0", Behavior::new(2, 20).validated())
         .await
         .expect("bind");
-    let mid = spawn_mock("127.0.0.1:0", Behavior::new(120, 160))
-        .await
-        .expect("bind");
-    let list = TempFile::with(&format!("{} Fast\n{} Mid\n", fast.addr, mid.addr));
-    let json_path = TempFile::with("");
-    let csv_path = TempFile::with("");
-    let html_path = TempFile::with("");
+    let tcp_port = tcp_stub().await;
+    let mut request = request(
+        vec![mock_candidate(&mock, "Fast", "Fast")],
+        Protocol::Udp,
+        200,
+    );
+    request.hostnames = vec!["steer.test".into()];
+    request.connect_port = tcp_port;
+    let (result, _) = run_engine(request);
+    let result = result.expect("the run should finish");
 
-    let out = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--no-color",
-        "--timeout",
-        "500",
-        "--export-json",
-        &json_path.arg(),
-        "--export-csv",
-        &csv_path.arg(),
-        "--export-html",
-        &html_path.arg(),
-        "steer.test",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-
-    let json_text = std::fs::read_to_string(json_path.path()).expect("read json export");
-    let json: serde_json::Value = serde_json::from_str(&json_text).expect("valid exported JSON");
-    assert_eq!(json["results"].as_array().unwrap().len(), 2);
+    let json: serde_json::Value =
+        serde_json::from_str(&report::json(&result)).expect("valid JSON report");
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(json["protocol"], "UDP");
+    assert_eq!(json["tested"], 1);
+    assert_eq!(json["results"][0]["rank"], 1);
+    assert_eq!(json["results"][0]["name"], "Fast");
+    assert_eq!(json["recommendation"]["name"], "Fast");
     assert_eq!(json["steerings"][0]["host"], "steer.test");
+    assert_eq!(json["results"][0]["security"], "DNSSEC validated");
 
-    let csv_text = std::fs::read_to_string(csv_path.path()).expect("read csv export");
-    assert!(csv_text.starts_with("rank,server,name,"));
-    assert_eq!(csv_text.lines().count(), 3);
+    let csv = report::csv(&result);
+    assert!(csv.starts_with("rank,provider,name,transport,server,"));
+    assert_eq!(csv.lines().count(), 2);
+    assert!(csv.contains("Fast"));
 
-    let html_text = std::fs::read_to_string(html_path.path()).expect("read html export");
-    assert!(html_text.contains("<!DOCTYPE html>"));
-    assert!(html_text.contains("<h2>Steering</h2>"));
-    assert!(html_text.contains("steer.test"));
+    let html = report::html(&result);
+    assert!(html.contains("<!doctype html>"));
+    assert!(html.contains("<h2>Steering</h2>"));
+    assert!(html.contains("steer.test"));
+    assert!(html.contains("DNSSEC validated"));
+
+    let summary = report::summary_text(&result);
+    assert!(summary.contains("Fastest: Fast"));
+    assert!(summary.contains("Security: DNSSEC validated"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_transport_works() {
+    let mock = spawn_tcp_mock("127.0.0.1:0", Behavior::new(2, 20).validated())
+        .await
+        .expect("bind tcp dns");
+    let request = request(
+        vec![mock_candidate(&mock, "Fast", "Fast")],
+        Protocol::Tcp,
+        250,
+    );
+    let (result, _) = run_engine(request);
+    let result = result.expect("the TCP run should finish");
+    assert_eq!(result.tested, 1);
+    let row = find(&result, "Fast");
+    assert_eq!(row.transport, Protocol::Tcp);
+    assert_eq!(row.security_status(), SecurityStatus::Validated);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ipv6_servers_work_where_the_machine_supports_ipv6() {
-    let Some(v6) = spawn_mock("[::1]:0", Behavior::new(3, 40)).await else {
+    let Some(v6) = spawn_mock("[::1]:0", Behavior::new(3, 20).validated()).await else {
         eprintln!("skipping: no IPv6 loopback on this machine");
         return;
     };
-    let v4 = spawn_mock("127.0.0.1:0", Behavior::new(120, 160))
+    let v4 = spawn_mock("127.0.0.1:0", Behavior::new(50, 80))
         .await
-        .expect("bind");
-    let list = TempFile::with(&format!("{} V6\n{} V4\n", v6.addr, v4.addr));
-
-    let out = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--no-color",
-        "--timeout",
-        "500",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("2 answered."), "{}", out.stdout);
-    let line = line_with(&out.stdout, " V6 ");
-    assert!(line.contains(&v6.addr.to_string()), "{line}");
-    assert!(!line.contains("UNRELIABLE"), "{line}");
-    assert!(position(&out.stdout, " V6 ") < position(&out.stdout, " V4 "));
+        .expect("bind v4");
+    let request = request(
+        vec![
+            mock_candidate(&v6, "V6", "V6"),
+            mock_candidate(&v4, "V4", "V4"),
+        ],
+        Protocol::Udp,
+        250,
+    );
+    let (result, _) = run_engine(request);
+    let result = result.expect("the IPv6 run should finish");
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0].label, "V6");
+    assert!(result.rows[0].score < result.rows[1].score);
 }
 
 #[tokio::test]
-async fn help_version_and_usage_errors() {
-    let help = run_dnsrace(&["--help"]).await;
-    assert_eq!(help.code, 0);
-    assert!(help.stdout.contains("USAGE:") && help.stdout.contains("--countries"));
-
-    let version = run_dnsrace(&["--version"]).await;
-    assert_eq!(version.code, 0);
-    assert_eq!(
-        version.stdout.trim(),
-        format!("dnsrace {}", env!("CARGO_PKG_VERSION"))
+async fn a_cancelled_run_returns_partial_state() {
+    let mock = spawn_mock("127.0.0.1:0", Behavior::new(10, 20))
+        .await
+        .expect("bind");
+    let request = request(
+        vec![mock_candidate(&mock, "Fast", "Fast")],
+        Protocol::Udp,
+        100,
     );
-
-    for args in [
-        &["--bogus"][..],
-        &["-c", "egypt"],
-        &["-k"],
-        &["https://example.com/x"],
-    ] {
-        let out = run_dnsrace(args).await;
-        assert_eq!(out.code, 2, "args {args:?}: {}", out.stderr);
-        assert!(out.stderr.starts_with("dnsrace: "), "{}", out.stderr);
-        assert!(out.stdout.is_empty(), "{}", out.stdout);
-    }
-
-    let missing = run_dnsrace(&["--servers", "/definitely/not/here.txt"]).await;
-    assert_eq!(missing.code, 1);
+    let cancel = Arc::new(AtomicBool::new(true));
+    let (result, events) = run_engine_cancelled(request, cancel);
+    let result = result.expect("cancellation is not an error");
+    assert_eq!(result.scanned, 0);
+    assert_eq!(result.tested, 0);
+    assert!(result.rows.is_empty());
     assert!(
-        missing.stderr.contains("cannot read the server list"),
-        "{}",
-        missing.stderr
+        events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Cancelled(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Finished(_)))
     );
 }
 
 #[tokio::test]
-async fn exits_with_an_error_when_nothing_answers() {
-    let port = closed_udp_port().await;
-    let list = TempFile::with(&format!("127.0.0.1:{port} Nobody\n"));
-    let out = run_dnsrace(&["--servers", &list.arg(), "--no-detect"]).await;
-    assert_eq!(out.code, 1);
-    assert!(out.stderr.contains("no server answered"), "{}", out.stderr);
+async fn an_empty_candidate_list_is_an_error() {
+    let request = request(Vec::new(), Protocol::Udp, 100);
+    let (result, _) = run_engine(request);
+    let error = result.expect_err("an empty run should be an error");
+    assert!(error.contains("no servers"), "{error}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn quiet_prints_only_the_recommended_address() {
-    let fast = spawn_mock("127.0.0.1:0", Behavior::new(2, 20))
-        .await
-        .expect("bind");
-    let slow = spawn_mock("127.0.0.1:0", Behavior::new(80, 100))
-        .await
-        .expect("bind");
-    let list = TempFile::with(&format!("{} Fast\n{} Slow\n", fast.addr, slow.addr));
-
-    let out = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--quiet",
-        "--timeout",
-        "500",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert_eq!(out.stdout.trim(), fast.addr.to_string());
-    assert_eq!(out.stdout.lines().count(), 1);
+#[test]
+fn apply_addresses_follow_the_provider_variant_only() {
+    let malware = "Cloudflare (malware)";
+    let candidates = vec![
+        Candidate::plain("1.1.1.2:53".parse().unwrap(), "Cloudflare", malware),
+        Candidate::plain("1.0.0.2:53".parse().unwrap(), "Cloudflare", malware),
+        Candidate::plain("1.1.1.1:53".parse().unwrap(), "Cloudflare", "Cloudflare"),
+    ];
+    let row = sample_row("plain:1.1.1.2:53", malware, "1.1.1.2", 10.0);
+    let addresses = engine::apply_addresses(&row, &candidates);
+    let expected: Vec<std::net::IpAddr> =
+        vec!["1.1.1.2".parse().unwrap(), "1.0.0.2".parse().unwrap()];
+    assert_eq!(addresses, expected);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn csv_has_a_header_and_one_row_per_server() {
-    let fast = spawn_mock("127.0.0.1:0", Behavior::new(2, 20))
-        .await
-        .expect("bind");
-    let slow = spawn_mock("127.0.0.1:0", Behavior::new(80, 100))
-        .await
-        .expect("bind");
-    let list = TempFile::with(&format!("{} Fast\n{} Slow\n", fast.addr, slow.addr));
-
-    let out = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--csv",
-        "--timeout",
-        "500",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    let lines: Vec<&str> = out.stdout.lines().collect();
-    assert_eq!(lines.len(), 3);
-    assert_eq!(
-        lines[0],
-        "rank,server,name,cached_ms,uncached_ms,min_ms,p95_ms,jitter_ms,timeouts,flag,dnssec,current"
-    );
-    assert!(lines[1].contains(&fast.addr.to_string()), "{}", lines[1]);
-    assert!(lines[1].contains(",Fast,"), "{}", lines[1]);
-    assert!(out.stderr.contains("Stage 1:"), "{}", out.stderr);
-    assert!(!out.stdout.contains("Stage 1:"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn address_family_filters_only_scan_that_family() {
-    let Some(v6) = spawn_mock("[::1]:0", Behavior::new(3, 20)).await else {
-        eprintln!("skipping: no IPv6 loopback on this machine");
-        return;
-    };
-    let v4 = spawn_mock("127.0.0.1:0", Behavior::new(2, 20))
-        .await
-        .expect("bind");
-    let list = TempFile::with(&format!("{} V6\n{} V4\n", v6.addr, v4.addr));
-
-    let out4 = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--no-color",
-        "--ipv4",
-        "--timeout",
-        "500",
-    ])
-    .await;
-    assert_eq!(out4.code, 0, "stderr: {}", out4.stderr);
-    assert!(out4.stdout.contains("quick scan of 1 candidate"));
-    assert!(out4.stdout.contains("1 answered."));
-    assert!(!out4.stdout.contains(&v6.addr.to_string()));
-
-    let out6 = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--no-color",
-        "--ipv6",
-        "--timeout",
-        "500",
-    ])
-    .await;
-    assert_eq!(out6.code, 0, "stderr: {}", out6.stderr);
-    assert!(out6.stdout.contains("quick scan of 1 candidate"));
-    assert!(out6.stdout.contains(&v6.addr.to_string()));
-    assert!(!out6.stdout.contains(&v4.addr.to_string()));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn verbose_shows_spread_and_dnssec() {
-    let fast = spawn_mock(
-        "127.0.0.1:0",
-        Behavior {
-            dnssec: true,
-            ..Behavior::new(2, 20)
-        },
-    )
-    .await
-    .expect("bind");
-    let list = TempFile::with(&format!("{} Fast\n", fast.addr));
-
-    let out = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--no-color",
-        "--verbose",
-        "--timeout",
-        "500",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("== Details:"), "{}", out.stdout);
-    assert!(out.stdout.contains("jitter"), "{}", out.stdout);
-    assert!(out.stdout.contains("DNSSEC yes"), "{}", out.stdout);
-    assert!(
-        out.stdout
-            .contains("DNSSEC validation:      1 of 1 healthy servers set the AD bit"),
-        "{}",
-        out.stdout
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn repeat_runs_more_rounds_and_still_ranks() {
-    let fast = spawn_mock("127.0.0.1:0", Behavior::new(2, 20))
-        .await
-        .expect("bind");
-    let slow = spawn_mock("127.0.0.1:0", Behavior::new(80, 100))
-        .await
-        .expect("bind");
-    let list = TempFile::with(&format!("{} Fast\n{} Slow\n", fast.addr, slow.addr));
-
-    let out = run_dnsrace(&[
-        "--servers",
-        &list.arg(),
-        "--no-detect",
-        "--no-color",
-        "--repeat",
-        "2",
-        "--timeout",
-        "500",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("2 rounds each"), "{}", out.stdout);
-    assert!(position(&out.stdout, " Fast ") < position(&out.stdout, " Slow "));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn added_servers_are_fully_tested_despite_known_limit() {
-    let a = spawn_mock("127.0.0.1:0", Behavior::new(2, 30))
-        .await
-        .expect("bind");
-    let b = spawn_mock("127.0.0.1:0", Behavior::new(50, 60))
-        .await
-        .expect("bind");
-    let c = spawn_mock("127.0.0.1:0", Behavior::new(200, 210))
-        .await
-        .expect("bind");
-    let empty = TempFile::with("# no servers in this list\n");
-    let added = format!("{},{},{}", a.addr, b.addr, c.addr);
-
-    let out = run_dnsrace(&[
-        "--servers",
-        &empty.arg(),
-        "--no-detect",
-        "--no-color",
-        "--add",
-        &added,
-        "--known",
-        "2",
-        "--timeout",
-        "500",
-    ])
-    .await;
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("3 answered."), "{}", out.stdout);
-    assert!(
-        out.stdout.contains("full test of 3 servers"),
-        "{}",
-        out.stdout
-    );
-    assert!(line_with(&out.stdout, &a.addr.to_string()).contains(" custom "));
-    // --add servers are always fully tested; --known does not take their slots
-    assert!(out.stdout.contains(&b.addr.to_string()), "{}", out.stdout);
-    assert!(out.stdout.contains(&c.addr.to_string()), "{}", out.stdout);
-    assert!(
-        position(&out.stdout, &a.addr.to_string()) < position(&out.stdout, &b.addr.to_string()),
-        "{}",
-        out.stdout
-    );
+#[test]
+fn a_custom_port_is_not_applyable() {
+    let mut row = sample_row("plain:9.9.9.9:5353", "Custom", "9.9.9.9", 10.0);
+    row.addr = Some("9.9.9.9:5353".parse().unwrap());
+    assert!(engine::apply_addresses(&row, &[]).is_empty());
 }

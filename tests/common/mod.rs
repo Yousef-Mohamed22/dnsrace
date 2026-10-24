@@ -1,30 +1,37 @@
-//! Helpers for the end-to-end tests: simulated DNS servers on loopback, and a way to run the
-//! real `dnsrace` binary against them. Everything is Rust and works on every platform.
+//! Helpers for the integration tests: simulated DNS servers on loopback and an in-process
+//! benchmark runner. The desktop binary is never launched, so these tests work on headless
+//! build machines.
 
-#![allow(dead_code)] // each test file uses a different subset
+#![allow(dead_code)] // each integration test uses a different subset
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
+use dnsrace::bench::{Note, Row};
+use dnsrace::engine::{self, RunEvent, RunRequest, RunResult};
+use dnsrace::servers::{Candidate, Protocol};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
 
-/// How a simulated server behaves.
+/// How a simulated DNS server behaves.
 #[derive(Clone, Copy)]
 pub struct Behavior {
     /// Delay before answering ordinary lookups.
     pub cached: Duration,
-    /// Delay before answering lookups of random names.
+    /// Delay before answering random names.
     pub uncached: Duration,
     /// Answer random names with a fake address instead of NXDOMAIN.
     pub hijack: bool,
-    /// Only ever answer google.com (the quick-scan lookup), so the full test fails.
+    /// Only ever answer google.com, so a full test cannot complete.
     pub only_google: bool,
     /// Set the DNSSEC Authenticated Data bit on every answer.
     pub dnssec: bool,
+    /// Return an answer for dnssec-failed.org instead of SERVFAIL.
+    pub accept_bogus: bool,
 }
 
 impl Behavior {
@@ -35,7 +42,18 @@ impl Behavior {
             hijack: false,
             only_google: false,
             dnssec: false,
+            accept_bogus: false,
         }
+    }
+
+    pub fn validated(mut self) -> Self {
+        self.dnssec = true;
+        self
+    }
+
+    pub fn accepts_bogus(mut self) -> Self {
+        self.accept_bogus = true;
+        self
     }
 }
 
@@ -74,66 +92,101 @@ fn build_reply(
     answers: &[Ipv4Addr],
     ad: bool,
 ) -> Vec<u8> {
-    let mut r = pkt[..question_end].to_vec();
-    r[2] = 0x81; // response, recursion desired
-    r[3] = 0x80 | rcode | if ad { 0x20 } else { 0 }; // RA, response code, maybe AD
-    r[6] = 0;
-    r[7] = answers.len() as u8;
-    for a in answers {
-        r.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
-        r.extend_from_slice(&a.octets());
+    let mut reply = pkt[..question_end].to_vec();
+    reply[2] = 0x81; // response, recursion desired
+    reply[3] = 0x80 | rcode | if ad { 0x20 } else { 0 }; // RA, rcode, maybe AD
+    reply[6] = 0;
+    reply[7] = answers.len() as u8;
+    for address in answers {
+        reply.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+        reply.extend_from_slice(&address.octets());
     }
-    r
+    reply
 }
 
-/// Starts a simulated server on `bind` (for example `127.0.0.1:0`). Returns `None` when the
-/// address can't be bound, which is how a machine without IPv6 shows up for `[::1]:0`.
+/// Creates the reply for one query, including the DNSSEC behavior.
+fn answer(packet: &[u8], behavior: Behavior) -> Option<(Vec<u8>, Duration)> {
+    let (name, qtype, end) = parse_question(packet)?;
+    if behavior.only_google && name != "google.com" {
+        return None;
+    }
+    let random = name.starts_with("dnsbench-");
+    let (rcode, answers, delayed): (u8, Vec<Ipv4Addr>, Duration) = if qtype != 1 {
+        (0, Vec::new(), behavior.cached)
+    } else if name == "dnssec-failed.org" && !behavior.accept_bogus {
+        (2, Vec::new(), behavior.cached)
+    } else if random {
+        if behavior.hijack {
+            (0, vec![Ipv4Addr::new(203, 0, 113, 7)], behavior.uncached)
+        } else {
+            (3, Vec::new(), behavior.uncached)
+        }
+    } else if name == "steer.test" || name == "steer2.test" {
+        (0, vec![Ipv4Addr::LOCALHOST], behavior.cached)
+    } else {
+        (0, vec![Ipv4Addr::new(198, 51, 100, 7)], behavior.cached)
+    };
+    Some((
+        build_reply(packet, end, rcode, &answers, behavior.dnssec),
+        delayed,
+    ))
+}
+
+/// Starts a simulated UDP DNS server. Returns `None` when the address cannot be bound.
 pub async fn spawn_mock(bind: &str, behavior: Behavior) -> Option<Mock> {
     let socket = Arc::new(UdpSocket::bind(bind).await.ok()?);
     let addr = socket.local_addr().ok()?;
-    let reader = socket.clone();
     let task = tokio::spawn(async move {
-        let mut buf = [0u8; 512];
+        let mut buffer = [0u8; 512];
         loop {
-            let Ok((n, peer)) = reader.recv_from(&mut buf).await else {
+            let Ok((length, peer)) = socket.recv_from(&mut buffer).await else {
                 continue;
             };
-            let packet = buf[..n].to_vec();
-            let Some((name, qtype, end)) = parse_question(&packet) else {
+            let packet = buffer[..length].to_vec();
+            let Some((reply, delay)) = answer(&packet, behavior) else {
                 continue;
-            };
-            if behavior.only_google && name != "google.com" {
-                continue;
-            }
-            let random = name.starts_with("dnsbench-");
-            let (rcode, answers): (u8, Vec<Ipv4Addr>) = if qtype != 1 {
-                (0, vec![]) // AAAA and the like: an empty answer
-            } else if random {
-                if behavior.hijack {
-                    (0, vec![Ipv4Addr::new(203, 0, 113, 7)])
-                } else {
-                    (3, vec![]) // NXDOMAIN
-                }
-            } else if name == "steer.test" || name == "steer2.test" {
-                (0, vec![Ipv4Addr::LOCALHOST])
-            } else {
-                (0, vec![Ipv4Addr::new(198, 51, 100, 7)])
-            };
-            let delay = if random {
-                behavior.uncached
-            } else {
-                behavior.cached
             };
             let sender = socket.clone();
-            // answer from a separate task so a slow server never blocks its own next lookup
             tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
-                let _ = sender
-                    .send_to(
-                        &build_reply(&packet, end, rcode, &answers, behavior.dnssec),
-                        peer,
-                    )
-                    .await;
+                let _ = sender.send_to(&reply, peer).await;
+            });
+        }
+    });
+    Some(Mock { addr, task })
+}
+
+/// Starts a simulated DNS-over-TCP server on `bind`.
+pub async fn spawn_tcp_mock(bind: &str, behavior: Behavior) -> Option<Mock> {
+    let listener = TcpListener::bind(bind).await.ok()?;
+    let addr = listener.local_addr().ok()?;
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _peer)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                loop {
+                    let mut length = [0u8; 2];
+                    if stream.read_exact(&mut length).await.is_err() {
+                        break;
+                    }
+                    let size = u16::from_be_bytes(length) as usize;
+                    let mut packet = vec![0u8; size];
+                    if stream.read_exact(&mut packet).await.is_err() {
+                        break;
+                    }
+                    let Some((reply, delay)) = answer(&packet, behavior) else {
+                        break;
+                    };
+                    tokio::time::sleep(delay).await;
+                    let length = (reply.len() as u16).to_be_bytes();
+                    if stream.write_all(&length).await.is_err()
+                        || stream.write_all(&reply).await.is_err()
+                    {
+                        break;
+                    }
+                }
             });
         }
     });
@@ -148,72 +201,75 @@ pub async fn closed_udp_port() -> u16 {
     port
 }
 
-/// A temporary file that is deleted when dropped.
-pub struct TempFile(PathBuf);
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-impl TempFile {
-    pub fn with(contents: &str) -> Self {
-        let name = format!(
-            "dnsrace-test-{}-{}.txt",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, contents).expect("write temp file");
-        TempFile(path)
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.0
-    }
-
-    pub fn arg(&self) -> String {
-        self.0.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// What a run of the binary printed.
-pub struct Output {
-    pub code: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-/// Runs the real binary (without blocking the simulated servers).
-pub async fn run_dnsrace(args: &[&str]) -> Output {
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_dnsrace"))
-            .args(&args)
-            .output()
-            .expect("failed to start dnsrace");
-        Output {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+/// A TCP listener that accepts connections and drops them. Steering only needs a successful
+/// three-way handshake.
+pub async fn tcp_stub() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        loop {
+            let _ = listener.accept().await;
         }
-    })
-    .await
-    .expect("the test task panicked")
+    });
+    port
 }
 
-/// The first line containing `needle`.
-pub fn line_with<'a>(text: &'a str, needle: &str) -> &'a str {
-    text.lines()
-        .find(|l| l.contains(needle))
-        .unwrap_or_else(|| panic!("no line containing {needle:?} in:\n{text}"))
+/// A candidate backed by a mock server.
+pub fn mock_candidate(mock: &Mock, provider: &str, label: &str) -> Candidate {
+    Candidate::plain(mock.addr, provider, label)
 }
 
-/// Where `needle` first appears.
-pub fn position(text: &str, needle: &str) -> usize {
-    text.find(needle)
-        .unwrap_or_else(|| panic!("{needle:?} not found in:\n{text}"))
+/// Runs the engine in-process. All emitted events are collected for assertions.
+pub fn run_engine(request: RunRequest) -> (Result<RunResult, String>, Vec<RunEvent>) {
+    run_engine_cancelled(request, Arc::new(AtomicBool::new(false)))
+}
+
+/// Runs the engine with a caller-supplied cancellation flag.
+pub fn run_engine_cancelled(
+    request: RunRequest,
+    cancel: Arc<AtomicBool>,
+) -> (Result<RunResult, String>, Vec<RunEvent>) {
+    // `run_blocking` creates and shuts down a Tokio runtime. Do that on a plain thread: dropping
+    // a runtime inside an async test's runtime is not allowed.
+    let (result_sender, result_receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (sender, receiver) = mpsc::channel();
+        let result = engine::run_blocking(request, sender, cancel);
+        let events = receiver.try_iter().collect();
+        let _ = result_sender.send((result, events));
+    });
+    result_receiver
+        .recv()
+        .expect("the benchmark helper thread stopped without a result")
+}
+
+/// A sample row for tests that do not need to run the network.
+pub fn sample_row(id: &str, label: &str, ip: &str, score: f64) -> Row {
+    Row {
+        id: id.to_string(),
+        provider: label.to_string(),
+        label: label.to_string(),
+        transport: Protocol::Udp,
+        addr: Some(format!("{ip}:53").parse().expect("socket address")),
+        endpoint: ip.to_string(),
+        cached: Some(score),
+        uncached: Some(score + 1.0),
+        cached_min: Some(score),
+        cached_p95: Some(score + 2.0),
+        cached_p99: Some(score + 3.0),
+        cached_mean: Some(score + 1.0),
+        cached_max: Some(score + 4.0),
+        cached_jitter: Some(1.0),
+        dnssec: Some(true),
+        dnssec_bogus: Some(true),
+        timeouts: 0,
+        note: Note::Ok,
+        score,
+    }
+}
+
+/// Waits briefly for background tasks to observe a cancellation flag.
+pub async fn cancel_soon(cancel: Arc<AtomicBool>) {
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    cancel.store(true, Ordering::Relaxed);
 }

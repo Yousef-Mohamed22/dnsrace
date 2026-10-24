@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.yousef_mohamed22.dnsrace</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>dnsrace</name>
+  <summary>Find and apply the fastest DNS resolver for your connection</summary>
+  <description>
+    <p>dnsrace measures public DNS resolvers from your own connection and ranks them by cached and uncached lookup latency. It supports plain DNS over UDP or TCP, DNS-over-TLS and DNS-over-HTTPS, checks DNSSEC behaviour and NXDOMAIN hijacking, and can optionally show where hostnames are steered.</p>
+    <ul>
+      <li>Test every built-in resolver or only the servers you select.</li>
+      <li>Compare popular-domain latency with uncached lookups, jitter and timeouts.</li>
+      <li>Apply the winner on Linux, Windows or macOS, with a saved state for reverting.</li>
+      <li>Keep a local run history and export JSON, CSV or HTML reports.</li>
+      <li>No telemetry, no account and no background service.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.yousef_mohamed22.dnsrace.desktop</launchable>
+  <url type="homepage">https://github.com/Yousef-Mohamed22/dnsrace</url>
+  <developer id="io.github.yousef_mohamed22">
+    <name>Yousef Mohamed</name>
+  </developer>
+  <categories>
+    <category>Network</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>DNS</keyword>
+    <keyword>resolver</keyword>
+    <keyword>latency</keyword>
+    <keyword>benchmark</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.6.0" date="2026-10-24">
+      <description>
+        <p>First release of the GUI-only desktop application, with DoT, expanded DoH providers, DNSSEC checks, history, exports and system DNS apply/revert.</p>
+      </description>
+    </release>
+  </releases>
+</component>
