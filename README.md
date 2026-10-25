@@ -1,5 +1,7 @@
 # dnsrace
 
+<img width="1366" height="768" alt="Screenshot_٢٠٢٦١٠٢٥_١٥٥٧١١" src="https://github.com/user-attachments/assets/86990291-f14d-4a20-81f1-fe7f72b9ec56" />
+
 > Find the fastest DNS resolver for **your** connection, then apply it in one click.
 
 The "best" DNS server depends on where you are and how your ISP routes traffic, so a top-10
