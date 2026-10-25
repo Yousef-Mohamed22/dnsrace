@@ -12,7 +12,7 @@ keywords = ["dns", "benchmark", "latency", "network", "gui"]
 categories = ["network-programming", "gui"]
 
 [dependencies]
-dirs = "6"
+dirs = "7"
 eframe = { version = "0.37", default-features = false }
 egui_extras = "0.37"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
