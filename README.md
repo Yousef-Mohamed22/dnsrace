@@ -1,6 +1,6 @@
 # dnsrace
 
-<img width="1366" height="768" alt="Screenshot_٢٠٢٦١٠٢٥_١٥٥٧١١" src="https://github.com/user-attachments/assets/86990291-f14d-4a20-81f1-fe7f72b9ec56" />
+<img width="1366" height="768" alt="Screenshot_٢٠٢٦١٠٣٠_١٨٥٢٥٤" src="https://github.com/user-attachments/assets/94a35726-b460-4792-948d-5f7c942c2342" />
 
 > Find the fastest DNS resolver for **your** connection, then apply it in one click.
 
