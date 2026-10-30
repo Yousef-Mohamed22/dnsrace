@@ -1,0 +1,147 @@
+name: Main snapshot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.99.1"
+
+concurrency:
+  group: main-snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux snapshot (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1-mesa-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxrandr-dev
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Stage snapshot
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          short="${GITHUB_SHA::7}"
+          folder="dnsrace-${version}-main-${short}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$folder"
+          cp target/release/dnsrace README.md CHANGELOG.md LICENSE "dist/$folder/"
+          tar -C dist -czf "dist/$folder.tar.gz" "$folder"
+
+      - name: Upload Linux snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-main-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows snapshot
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Stage snapshot
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          $short = $env:GITHUB_SHA.Substring(0, 7)
+          $folder = "dist/dnsrace-$version-main-$short-windows-x86_64"
+          New-Item -ItemType Directory -Force $folder | Out-Null
+          Copy-Item target/release/dnsrace.exe "$folder/dnsrace.exe"
+          Copy-Item README.md, CHANGELOG.md, LICENSE "$folder/"
+          Compress-Archive -Path "$folder/*" -DestinationPath "$folder.zip"
+
+      - name: Upload Windows snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-main-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    name: macOS snapshot (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: macos-latest
+            arch: aarch64
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Stage snapshot
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          short="${GITHUB_SHA::7}"
+          folder="dnsrace-${version}-main-${short}-macos-${{ matrix.arch }}"
+          mkdir -p "dist/$folder"
+          cp "target/${{ matrix.target }}/release/dnsrace" README.md CHANGELOG.md LICENSE "dist/$folder/"
+          ditto -c -k --sequesterRsrc --keepParent "dist/$folder" "dist/$folder.zip"
+
+      - name: Upload macOS snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-main-macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

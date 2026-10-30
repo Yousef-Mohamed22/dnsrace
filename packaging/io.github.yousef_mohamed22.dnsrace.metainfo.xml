@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.yousef_mohamed22.dnsrace</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>dnsrace</name>
+  <summary>Find and apply the fastest DNS resolver for your connection</summary>
+  <description>
+    <p>dnsrace measures public DNS resolvers from your own connection and ranks them by cached and uncached lookup latency. It detects the DNS servers your system is already using, supports plain DNS over UDP or TCP, DNS-over-TLS and DNS-over-HTTPS, checks DNSSEC behaviour and NXDOMAIN hijacking, and can optionally show where hostnames are steered.</p>
+    <ul>
+      <li>Detect the current system DNS, with provider names, interface and detection source.</li>
+      <li>Test every built-in resolver, only the servers you select, or the current DNS.</li>
+      <li>Compare popular-domain latency with uncached lookups, jitter and timeouts.</li>
+      <li>Apply the winner on Linux, Windows or macOS, with a saved state for reverting.</li>
+      <li>Sort and filter results, choose from eight themes, and keep a local run history.</li>
+      <li>Export JSON, CSV or HTML reports. No telemetry, account or background service.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.yousef_mohamed22.dnsrace.desktop</launchable>
+  <url type="homepage">https://github.com/Yousef-Mohamed22/dnsrace</url>
+  <developer id="io.github.yousef_mohamed22">
+    <name>Yousef Mohamed</name>
+  </developer>
+  <categories>
+    <category>Network</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>DNS</keyword>
+    <keyword>resolver</keyword>
+    <keyword>latency</keyword>
+    <keyword>benchmark</keyword>
+  </keywords>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.7.0" date="2026-10-30">
+      <description>
+        <p>Automatic cross-platform DNS detection, provider-aware addresses, eight themes, sortable columns, health and category filters, current-DNS comparison, keyboard shortcuts and collision-safe exports. Fixes building with current rustls-native-certs, validates DNS reply questions, and adds DoH support for AAAA and DNSSEC queries.</p>
+      </description>
+    </release>
+    <release version="0.6.0" date="2026-10-24">
+      <description>
+        <p>First release of the GUI-only desktop application, with DoT, expanded DoH providers, DNSSEC checks, history, exports and system DNS apply/revert.</p>
+      </description>
+    </release>
+  </releases>
+</component>

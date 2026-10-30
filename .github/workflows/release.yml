@@ -1,0 +1,284 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.99.1"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check version and release notes
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "Cargo.toml version ($version) does not match tag ($GITHUB_REF_NAME)." >&2
+            exit 1
+          fi
+          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes" ]; then
+            echo "Missing release notes: $notes" >&2
+            exit 1
+          fi
+          echo "Releasing dnsrace $version with $notes."
+
+  release-linux:
+    name: Linux AppImage (${{ matrix.arch }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+            file_arch: x86-64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            file_arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            appstream \
+            desktop-file-utils \
+            file \
+            libegl1-mesa-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxrandr-dev
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build AppImage
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ./packaging/build-appimage.sh \
+            "$version" \
+            "${{ matrix.arch }}" \
+            target/release/dnsrace \
+            dist
+
+      - name: Inspect AppImage contents
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          app="dist/dnsrace-${version}-${{ matrix.arch }}.AppImage"
+          test -x "$app"
+          rm -rf squashfs-root
+          "$app" --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/bin/dnsrace
+          test -f squashfs-root/usr/share/applications/io.github.yousef_mohamed22.dnsrace.desktop
+          test -f squashfs-root/usr/share/metainfo/io.github.yousef_mohamed22.dnsrace.metainfo.xml
+          file squashfs-root/usr/bin/dnsrace | tee file.txt
+          grep -q "${{ matrix.file_arch }}" file.txt
+          if ldd squashfs-root/usr/bin/dnsrace | grep -q "not found"; then
+            echo "the AppImage binary has missing shared libraries" >&2
+            ldd squashfs-root/usr/bin/dnsrace >&2
+            exit 1
+          fi
+          desktop-file-validate \
+            squashfs-root/usr/share/applications/io.github.yousef_mohamed22.dnsrace.desktop
+          appstreamcli validate --no-net \
+            squashfs-root/usr/share/metainfo/io.github.yousef_mohamed22.dnsrace.metainfo.xml
+          cat "dist/dnsrace-${version}-${{ matrix.arch }}.AppImage.sha256"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release-windows:
+    name: Windows x86_64
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Stage Windows archive
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $folder = "dist/dnsrace-$version-windows-x86_64"
+          New-Item -ItemType Directory -Force $folder | Out-Null
+          Copy-Item target/release/dnsrace.exe "$folder/dnsrace.exe"
+          Copy-Item README.md, CHANGELOG.md, LICENSE "$folder/"
+          Compress-Archive -Path "$folder/*" -DestinationPath "dist/dnsrace-$version-windows-x86_64.zip"
+
+      - name: Upload Windows archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  release-macos:
+    name: macOS (${{ matrix.arch }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: macos-latest
+            arch: aarch64
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Build macOS app bundle
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bundle_root="dist/dnsrace-${version}-macos-${{ matrix.arch }}"
+          app="$bundle_root/dnsrace.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/dnsrace" "$app/Contents/MacOS/dnsrace"
+          chmod +x "$app/Contents/MacOS/dnsrace"
+          icon_dir="$bundle_root/dnsrace.iconset"
+          mkdir -p "$icon_dir"
+          for size in 16 32 128 256 512; do
+            sips -z "$size" "$size" packaging/icon-256.png \
+              --out "$icon_dir/icon_${size}x${size}.png" >/dev/null
+            sips -z "$((size * 2))" "$((size * 2))" packaging/icon-256.png \
+              --out "$icon_dir/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$icon_dir" -o "$app/Contents/Resources/dnsrace.icns"
+          rm -rf "$icon_dir"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleDisplayName</key>
+              <string>dnsrace</string>
+              <key>CFBundleExecutable</key>
+              <string>dnsrace</string>
+              <key>CFBundleIconFile</key>
+              <string>dnsrace.icns</string>
+              <key>CFBundleIdentifier</key>
+              <string>io.github.yousef_mohamed22.dnsrace</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>dnsrace</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${version}</string>
+              <key>CFBundleVersion</key>
+              <string>${version}</string>
+              <key>LSApplicationCategoryType</key>
+              <string>public.app-category.utilities</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>11.0</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --deep --sign - "$app"
+          cp README.md CHANGELOG.md LICENSE "$bundle_root/"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle_root" "dist/dnsrace-${version}-macos-${{ matrix.arch }}.zip"
+
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [release-linux, release-windows, release-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate combined checksums
+        run: |
+          cd dist
+          : > SHA256SUMS.txt
+          for file in dnsrace-*.AppImage dnsrace-*.zip; do
+            [ -f "$file" ] || continue
+            sha256sum "$file" >> SHA256SUMS.txt
+          done
+          test -s SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Select release notes
+        run: cp ".github/release-notes/${GITHUB_REF_NAME}.md" release-body.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: dnsrace ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release-body.md
+          draft: false
+          prerelease: false
+          files: |
+            dist/dnsrace-*.AppImage
+            dist/dnsrace-*.AppImage.sha256
+            dist/dnsrace-*-windows-x86_64.zip
+            dist/dnsrace-*-macos-*.zip
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true

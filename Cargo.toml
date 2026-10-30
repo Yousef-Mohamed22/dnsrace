@@ -1,0 +1,67 @@
+[package]
+name = "dnsrace"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.99.1"
+description = "Find the fastest DNS resolver for your connection, with a native desktop interface"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Yousef-Mohamed22/dnsrace"
+homepage = "https://github.com/Yousef-Mohamed22/dnsrace"
+keywords = ["dns", "benchmark", "latency", "network", "gui"]
+categories = ["network-programming", "gui"]
+
+[dependencies]
+dirs = "7"
+eframe = { version = "0.37", default-features = false }
+egui_extras = "0.37"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+ureq = { version = "2.12", features = ["native-certs"] }
+webpki-roots = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies.eframe]
+version = "0.37"
+default-features = false
+features = [
+    "glow",
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "links",
+    "system_fonts",
+    "wayland",
+    "x11",
+]
+
+[target.'cfg(target_os = "windows")'.dependencies.eframe]
+version = "0.37"
+default-features = false
+features = ["wgpu", "accesskit", "clipboard", "default_fonts", "links", "system_fonts"]
+
+[target.'cfg(target_os = "macos")'.dependencies.eframe]
+version = "0.37"
+default-features = false
+features = ["wgpu", "accesskit", "clipboard", "default_fonts", "links", "system_fonts"]
+
+[dev-dependencies]
+base64 = "0.23"
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[lib]
+name = "dnsrace"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dnsrace"
+path = "src/main.rs"
