@@ -358,6 +358,18 @@ pub fn meta(name: &str) -> Option<&'static ProviderMeta> {
     PROVIDERS.iter().find(|p| p.name == name)
 }
 
+/// The DoT hostname to offer in the Android Private DNS guide. The label is the most precise
+/// match (it distinguishes provider variants); the provider name and group are fallbacks.
+pub fn dot_host_for(provider: &str, label: &str) -> Option<&'static str> {
+    PROVIDERS
+        .iter()
+        .find(|p| p.label == label)
+        .or_else(|| PROVIDERS.iter().find(|p| p.name == provider))
+        .or_else(|| PROVIDERS.iter().find(|p| p.group == provider))
+        .and_then(|p| p.dot)
+        .map(|dot| dot.host)
+}
+
 /// Looks up the provider that owns a plain DNS address. This is what makes auto-detection
 /// useful: a system resolver of `1.1.1.1` is shown as Cloudflare, not as an anonymous address.
 pub fn identify_ip(ip: IpAddr) -> Option<&'static ProviderMeta> {
@@ -779,5 +791,22 @@ mod tests {
         assert!(found.iter().any(|candidate| {
             candidate.label == "Current DNS (203.0.113.7)" && candidate.provider == CURRENT
         }));
+    }
+
+    #[test]
+    fn dot_host_resolves_plain_and_encrypted_providers() {
+        assert_eq!(
+            dot_host_for("Cloudflare", "Cloudflare"),
+            Some("cloudflare-dns.com")
+        );
+        assert_eq!(
+            dot_host_for("Cloudflare", "Cloudflare (malware)"),
+            Some("cloudflare-dns.com")
+        );
+        assert_eq!(
+            dot_host_for("Google", "Google Public DNS"),
+            Some("dns.google")
+        );
+        assert_eq!(dot_host_for("custom", "Mine"), None);
     }
 }

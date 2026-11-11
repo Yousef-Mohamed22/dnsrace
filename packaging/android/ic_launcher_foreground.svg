@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="432" height="432" viewBox="0 0 108 108">
+  <defs>
+    <linearGradient id="signal" gradientUnits="userSpaceOnUse" x1="52" y1="198" x2="170" y2="82">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="0.5" stop-color="#2DCCD2"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+  </defs>
+  <!-- Adaptive foreground: transparent canvas, mark inside the centred 66 dp safe zone. -->
+  <g transform="translate(1.33 6.11) scale(0.3975)">
+    <rect x="52" y="146" width="30" height="52" rx="8" fill="url(#signal)"/>
+    <rect x="96" y="116" width="30" height="82" rx="8" fill="url(#signal)"/>
+    <rect x="140" y="82" width="30" height="116" rx="8" fill="url(#signal)"/>
+    <circle cx="198" cy="58" r="15" fill="#34D399"/>
+  </g>
+</svg>

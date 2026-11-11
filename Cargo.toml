@@ -1,6 +1,6 @@
 [package]
 name = "dnsrace"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.99.1"
 description = "Find the fastest DNS resolver for your connection, with a native desktop interface"
@@ -10,6 +10,40 @@ repository = "https://github.com/Yousef-Mohamed22/dnsrace"
 homepage = "https://github.com/Yousef-Mohamed22/dnsrace"
 keywords = ["dns", "benchmark", "latency", "network", "gui"]
 categories = ["network-programming", "gui"]
+
+# cargo-apk 0.10 manifest. `target_sdk_version` is also the compile SDK: cargo-apk
+# compiles resources against `platforms/android-36/android.jar`.
+[package.metadata.android]
+package = "io.github.yousef_mohamed22.dnsrace"
+apk_name = "dnsrace"
+build_targets = [
+    "armv7-linux-androideabi",
+    "aarch64-linux-android",
+    "x86_64-linux-android",
+]
+resources = "packaging/android/res"
+# Keep the debug-signed APK portable: strip DWARF from the three .so files.
+strip = "strip"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 36
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"
+
+[package.metadata.android.application]
+icon = "@mipmap/ic_launcher"
+label = "dnsrace"
+extract_native_libs = true
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
+
+[package.metadata.android.application.activity]
+config_changes = "orientation|keyboardHidden|screenSize|density|screenLayout|smallestScreenSize|uiMode"
+resizeable_activity = true
 
 [dependencies]
 dirs = "7"
@@ -48,8 +82,25 @@ version = "0.37"
 default-features = false
 features = ["wgpu", "accesskit", "clipboard", "default_fonts", "links", "system_fonts"]
 
+[target.'cfg(target_os = "android")'.dependencies]
+# `accesskit` is rejected by eframe with `android-native-activity`; desktop builds keep it.
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "clipboard",
+    "default_fonts",
+    "links",
+    "system_fonts",
+    "android-native-activity",
+] }
+winit = "0.30"
+jni = "0.22"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dev-dependencies]
 base64 = "0.23"
+egui_kittest = "0.37"
 serde_json = "1"
 
 [profile.release]
@@ -61,6 +112,7 @@ strip = true
 [lib]
 name = "dnsrace"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "dnsrace"

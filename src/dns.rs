@@ -206,14 +206,15 @@ pub fn parse_reply(buf: &[u8], id: u16) -> Option<Parsed> {
 /// spoofed packet with the right transaction id but a different name from being measured.
 fn parse_reply_for(buf: &[u8], id: u16, name: &str, qtype: u16, qclass: u16) -> Option<Parsed> {
     let parsed = parse_reply(buf, id)?;
-    if let Some(question) = &parsed.question {
-        let expected = name.trim_end_matches('.');
-        if !question.name.eq_ignore_ascii_case(expected)
-            || question.qtype != qtype
-            || question.qclass != qclass
-        {
-            return None;
-        }
+    // A valid reply must echo our question. A reply with no question cannot be matched to the
+    // query and must not be measured (it could be a stray packet with a guessed transaction id).
+    let question = parsed.question.as_ref()?;
+    let expected = name.trim_end_matches('.');
+    if !question.name.eq_ignore_ascii_case(expected)
+        || question.qtype != qtype
+        || question.qclass != qclass
+    {
+        return None;
     }
     Some(parsed)
 }
@@ -667,6 +668,32 @@ mod tests {
         assert!(parse_reply_for(&r, 6, "other.example", TYPE_A, CLASS_IN).is_none());
         assert!(parse_reply_for(&r, 6, "example.com", TYPE_AAAA, CLASS_IN).is_none());
         assert!(parse_reply_for(&r, 6, "example.com", TYPE_A, CLASS_CH).is_none());
+    }
+
+    #[test]
+    fn reply_without_question_is_rejected() {
+        let mut r = reply_with(7, TYPE_A, CLASS_IN, 0, &[]);
+        r[4] = 0; // QDCOUNT = 0: no echoed question
+        r[5] = 0;
+        assert!(parse_reply(&r, 7).is_some(), "the raw parser tolerates it");
+        assert!(
+            parse_reply_for(&r, 7, "example.com", TYPE_A, CLASS_IN).is_none(),
+            "but it is not a valid reply to our question"
+        );
+    }
+
+    #[test]
+    fn reply_with_mismatched_question_is_rejected() {
+        let mut r = reply_with(8, TYPE_A, CLASS_IN, 0, &[]);
+        // Rewrite the first byte of the echoed name: example.com -> xxample.com.
+        r[13] = b'x';
+        assert!(parse_reply_for(&r, 8, "example.com", TYPE_A, CLASS_IN).is_none());
+    }
+
+    #[test]
+    fn reply_with_matching_question_is_accepted() {
+        let r = reply_with(9, TYPE_A, CLASS_IN, 0, &[]);
+        assert!(parse_reply_for(&r, 9, "example.com", TYPE_A, CLASS_IN).is_some());
     }
 
     #[test]

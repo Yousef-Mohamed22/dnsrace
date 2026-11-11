@@ -145,3 +145,54 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 14
+
+  android:
+    name: Android snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: armv7-linux-androideabi,aarch64-linux-android,x86_64-linux-android
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform, build tools, and NDK
+        run: |
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;30.0.16248370"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/30.0.16248370" >> "$GITHUB_ENV"
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --version 0.10.0 --locked
+
+      - name: Build debug APK
+        run: cargo apk build --lib
+
+      - name: Stage snapshot
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          short="${GITHUB_SHA::7}"
+          mkdir -p dist
+          cp target/debug/apk/dnsrace.apk \
+            "dist/dnsrace-${version}-main-${short}-android-debug.apk"
+
+      - name: Upload Android snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-main-android
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

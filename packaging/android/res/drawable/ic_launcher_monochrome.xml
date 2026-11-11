@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 13 themed icon: a single-colour alpha mask of the signal mark. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="1.33"
+        android:translateY="6.11"
+        android:scaleX="0.3975"
+        android:scaleY="0.3975">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M60,146 L82,146 A8,8 0 0 1 90,154 L90,190 A8,8 0 0 1 82,198 L60,198 A8,8 0 0 1 52,190 L52,154 A8,8 0 0 1 60,146 Z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M104,116 L126,116 A8,8 0 0 1 134,124 L134,190 A8,8 0 0 1 126,198 L104,198 A8,8 0 0 1 96,190 L96,124 A8,8 0 0 1 104,116 Z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M148,82 L170,82 A8,8 0 0 1 178,90 L178,190 A8,8 0 0 1 170,198 L148,198 A8,8 0 0 1 140,190 L140,90 A8,8 0 0 1 148,82 Z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M198,43 A15,15 0 1 1 198,73 A15,15 0 1 1 198,43 Z" />
+    </group>
+</vector>

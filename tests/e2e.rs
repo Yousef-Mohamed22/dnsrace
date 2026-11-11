@@ -28,6 +28,9 @@ fn request(candidates: Vec<Candidate>, protocol: Protocol, wait_ms: u64) -> RunR
         connect_port: 443,
         include_system: false,
         include_nearby: false,
+        environment: None,
+        profile: dnsrace::profile::Profile::Balanced,
+        depth: dnsrace::profile::TestDepth::BALANCED,
     }
 }
 

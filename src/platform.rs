@@ -8,12 +8,14 @@
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+#[cfg(any(not(target_os = "android"), test))]
 use std::process::Command;
+#[cfg(any(not(target_os = "android"), test))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::servers::is_usable_ip;
+use crate::servers::{Protocol, is_usable_ip};
 
 /// A saved system change. It is written to the config directory after a successful apply.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,6 +46,7 @@ impl AppliedDns {
     }
 }
 
+#[cfg(any(not(target_os = "android"), test))]
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -51,16 +54,124 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-pub const fn platform_name() -> &'static str {
-    if cfg!(target_os = "linux") {
-        "Linux"
-    } else if cfg!(target_os = "windows") {
-        "Windows"
-    } else if cfg!(target_os = "macos") {
-        "macOS"
-    } else {
-        "this platform"
+/// The operating-system family the interface is running on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Platform {
+    Linux,
+    Windows,
+    Macos,
+    Android,
+    Other,
+}
+
+impl Platform {
+    pub const fn current() -> Self {
+        if cfg!(target_os = "linux") {
+            Platform::Linux
+        } else if cfg!(target_os = "windows") {
+            Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            Platform::Macos
+        } else if cfg!(target_os = "android") {
+            Platform::Android
+        } else {
+            Platform::Other
+        }
     }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Platform::Linux => "Linux",
+            Platform::Windows => "Windows",
+            Platform::Macos => "macOS",
+            Platform::Android => "Android",
+            Platform::Other => "this platform",
+        }
+    }
+
+    pub const fn is_android(self) -> bool {
+        matches!(self, Platform::Android)
+    }
+}
+
+/// What the current platform can actually do. The interface branches on these values instead
+/// of scattering `cfg!` checks through pages and buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capabilities {
+    pub platform: Platform,
+    pub can_apply_dns: bool,
+    pub can_detect_system_dns: bool,
+    pub can_export_files: bool,
+    pub default_protocol: Protocol,
+    pub android_sdk: Option<u32>,
+}
+
+impl Capabilities {
+    pub const fn current() -> Self {
+        if cfg!(target_os = "android") {
+            Self {
+                platform: Platform::Android,
+                can_apply_dns: false,
+                can_detect_system_dns: true,
+                can_export_files: false,
+                default_protocol: Protocol::Dot,
+                android_sdk: None,
+            }
+        } else if cfg!(target_os = "linux") {
+            Self::desktop(Platform::Linux)
+        } else if cfg!(target_os = "windows") {
+            Self::desktop(Platform::Windows)
+        } else if cfg!(target_os = "macos") {
+            Self::desktop(Platform::Macos)
+        } else {
+            Self::desktop(Platform::Other)
+        }
+    }
+
+    const fn desktop(platform: Platform) -> Self {
+        Capabilities {
+            platform,
+            can_apply_dns: true,
+            can_detect_system_dns: true,
+            can_export_files: true,
+            default_protocol: Protocol::Udp,
+            android_sdk: None,
+        }
+    }
+
+    pub const fn desktop_for_test() -> Self {
+        Self::desktop(Platform::Linux)
+    }
+
+    /// Android never applies DNS changes or writes report files. The API level decides whether
+    /// the Private DNS hostname guide or the per-network Wi-Fi guide is shown.
+    pub const fn android(api_level: u32) -> Self {
+        Capabilities {
+            platform: Platform::Android,
+            can_apply_dns: false,
+            can_detect_system_dns: true,
+            can_export_files: false,
+            default_protocol: Protocol::Dot,
+            android_sdk: Some(api_level),
+        }
+    }
+
+    pub const fn android_for_test(api_level: u32) -> Self {
+        Self::android(api_level)
+    }
+
+    pub const fn is_android(self) -> bool {
+        self.platform.is_android()
+    }
+}
+
+/// Capabilities for the running Android app, supplied by the JNI host at startup.
+pub fn android_capabilities(host: &dyn crate::android::AndroidHost) -> Capabilities {
+    Capabilities::android(host.sdk_int())
+}
+
+pub const fn platform_name() -> &'static str {
+    Platform::current().label()
 }
 
 pub fn validation_error(servers: &[IpAddr]) -> Option<String> {
@@ -128,6 +239,7 @@ pub fn revert(applied: &AppliedDns) -> Result<(), String> {
     }
 }
 
+#[cfg(any(not(target_os = "android"), test))]
 fn run_command(program: &str, args: &[String]) -> Result<String, String> {
     let mut command = Command::new(program);
     command.args(args);
@@ -854,6 +966,50 @@ mod tests {
     #[test]
     fn platform_name_is_not_empty() {
         assert!(!platform_name().is_empty());
+    }
+
+    #[test]
+    fn platform_name_android() {
+        assert_eq!(Platform::Android.label(), "Android");
+        assert!(Platform::Android.is_android());
+        assert!(!Platform::Linux.is_android());
+    }
+
+    #[test]
+    fn desktop_capabilities_allow_apply_and_detection() {
+        let capabilities = Capabilities::desktop_for_test();
+        assert_eq!(capabilities.platform, Platform::Linux);
+        assert!(capabilities.can_apply_dns);
+        assert!(capabilities.can_detect_system_dns);
+        assert!(capabilities.can_export_files);
+        assert!(!capabilities.is_android());
+        assert_eq!(capabilities.android_sdk, None);
+    }
+
+    #[test]
+    fn android_capabilities_forbid_apply_and_file_export() {
+        let capabilities = Capabilities::android_for_test(33);
+        assert_eq!(capabilities.platform, Platform::Android);
+        assert!(!capabilities.can_apply_dns);
+        assert!(!capabilities.can_export_files);
+        assert!(capabilities.is_android());
+        assert_eq!(capabilities.android_sdk, Some(33));
+    }
+
+    #[test]
+    fn android_default_protocol_is_dot() {
+        assert_eq!(
+            Capabilities::android_for_test(33).default_protocol,
+            Protocol::Dot
+        );
+    }
+
+    #[test]
+    fn desktop_default_protocol_is_udp() {
+        assert_eq!(
+            Capabilities::desktop_for_test().default_protocol,
+            Protocol::Udp
+        );
     }
 
     #[test]

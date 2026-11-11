@@ -21,7 +21,9 @@ use crate::dns::{
     CLASS_CH, CLASS_IN, Reply, TYPE_A, TYPE_AAAA, TYPE_TXT, doh_query_ext, query_dot, query_ext,
     query_tcp_ext,
 };
-use crate::servers::{Candidate, Protocol, Target, is_known};
+use crate::profile::TestDepth;
+use crate::providers;
+use crate::servers::{Candidate, Category, Protocol, Target, is_known};
 use crate::util::{median, ms, percentile, rand64, stddev};
 
 /// Popular sites used for the "cached" lookups: the big resolvers almost always have these.
@@ -43,12 +45,8 @@ const SCAN_JOBS: usize = 64;
 /// How many addresses are connection-tested at once (each uses three sockets). Kept low so
 /// systems with a small open-file limit, such as macOS, never run out.
 const CONNECT_JOBS: usize = 16;
-/// A server that fails this many of its 35 lookups in one round is declared unreliable.
+/// A server that fails this many of its 35 baseline lookups in one round is declared unreliable.
 const MAX_FAILS: u32 = 8;
-/// How many times each popular site is looked up.
-const ROUNDS: usize = 3;
-/// How many random, uncacheable names are looked up.
-const RANDOM_LOOKUPS: usize = 5;
 
 /// A short verdict for a row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +113,19 @@ pub struct Row {
     pub addr: Option<SocketAddr>,
     /// Human-readable endpoint (address or encrypted URL).
     pub endpoint: String,
+    /// The provider category carried by the candidate. Older history files have no category.
+    #[serde(default)]
+    pub category: Category,
+    /// The provider's own explanation, distinct from the health verdict in [`Row::note`].
+    #[serde(default)]
+    pub description: String,
+    /// The provider website, when known.
+    #[serde(default)]
+    pub website: String,
+    /// A DoT hostname that can be copied into Android Private DNS. `None` when the provider has
+    /// no known hostname.
+    #[serde(default)]
+    pub dot_host: Option<String>,
     /// Median of the lookups of popular sites, in ms.
     pub cached: Option<f64>,
     /// Median of lookups of random names, in ms.
@@ -250,9 +261,24 @@ async fn warm_up(
     while set.join_next().await.is_some() {}
 }
 
-/// Tests one server: 30 lookups of popular sites (cached) and 5 lookups of random names that
-/// should not exist (uncached). `repeat` pools several rounds so a noisy connection produces a
-/// steadier median. Two extra queries check DNSSEC and a deliberately broken signature.
+/// Map the response for the deliberately broken `dnssec-failed.org` name to the row's
+/// "correctly rejected" flag. `None` means the check could not decide.
+pub(crate) fn classify_bogus_rcode(rcode: u8) -> Option<bool> {
+    match rcode {
+        0 => Some(false), // NOERROR: the broken signature was accepted
+        2 => Some(true),  // SERVFAIL: the resolver correctly rejected it
+        _ => None,        // NXDOMAIN, REFUSED, timeouts and other errors decide nothing
+    }
+}
+
+/// The inner round and random-lookup counts a depth asks for, clamped to a safe range.
+pub(crate) fn lookup_plan(depth: TestDepth) -> (usize, usize) {
+    let depth = depth.clamped();
+    (depth.cached_rounds, depth.random_lookups)
+}
+
+/// Tests one server using the balanced depth. Kept as a convenience for callers that predate
+/// profiles.
 pub async fn full_test(
     candidate: Candidate,
     protocol: Protocol,
@@ -260,7 +286,32 @@ pub async fn full_test(
     repeat: usize,
     cancel: Arc<AtomicBool>,
 ) -> Row {
+    full_test_with_depth(
+        candidate,
+        protocol,
+        wait,
+        repeat,
+        TestDepth::BALANCED,
+        cancel,
+    )
+    .await
+}
+
+/// Tests one server: popular sites are looked up `depth.cached_rounds` times each and random
+/// names that should not exist are looked up `depth.random_lookups` times. `repeat` pools several
+/// outer rounds so a noisy connection produces a steadier median. Two extra queries check DNSSEC
+/// and a deliberately broken signature.
+#[allow(clippy::too_many_arguments)]
+pub async fn full_test_with_depth(
+    candidate: Candidate,
+    protocol: Protocol,
+    wait: Duration,
+    repeat: usize,
+    depth: TestDepth,
+    cancel: Arc<AtomicBool>,
+) -> Row {
     let repeat = repeat.max(1);
+    let (cached_rounds, random_lookups) = lookup_plan(depth);
     let max_fails = MAX_FAILS.saturating_mul(repeat as u32);
     let mut cached: Vec<f64> = Vec::new();
     let mut uncached: Vec<f64> = Vec::new();
@@ -276,7 +327,7 @@ pub async fn full_test(
             break;
         }
         for domain in DOMAINS {
-            for _ in 0..ROUNDS {
+            for _ in 0..cached_rounds {
                 if cancel.load(Ordering::Relaxed) {
                     unreliable = true;
                     break 'rounds;
@@ -296,7 +347,7 @@ pub async fn full_test(
             }
         }
 
-        for _ in 0..RANDOM_LOOKUPS {
+        for _ in 0..random_lookups {
             if cancel.load(Ordering::Relaxed) {
                 unreliable = true;
                 break 'rounds;
@@ -374,7 +425,7 @@ pub async fn full_test(
             true,
         )
         .await
-        .map(|r| r.rcode == 2);
+        .and_then(|r| classify_bogus_rcode(r.rcode));
         (ad, bogus)
     };
 
@@ -388,6 +439,10 @@ pub async fn full_test(
         Note::Hijacks => 5_000.0, // flagged servers sort to the bottom
         Note::Unreliable => 10_000.0,
     };
+    let dot_host = match &candidate.target {
+        Target::Dot { host, .. } => Some(host.clone()),
+        _ => providers::dot_host_for(&candidate.provider, &candidate.label).map(str::to_owned),
+    };
     Row {
         id: candidate.id.clone(),
         provider: candidate.provider.clone(),
@@ -395,6 +450,10 @@ pub async fn full_test(
         transport: protocol,
         addr: candidate.plain_addr(),
         endpoint: candidate.endpoint(),
+        category: candidate.category,
+        description: candidate.note.clone(),
+        website: candidate.website.clone(),
+        dot_host,
         cached: cached_median,
         uncached: uncached_median,
         cached_min,
@@ -504,6 +563,7 @@ pub async fn full_tests(
     jobs: usize,
     wait: Duration,
     repeat: usize,
+    depth: TestDepth,
     cancel: Arc<AtomicBool>,
     mut on_row: impl FnMut(Row),
     mut on_progress: impl FnMut(usize, usize),
@@ -516,7 +576,7 @@ pub async fn full_tests(
         let cancel = cancel.clone();
         set.spawn(async move {
             let _permit = sem.acquire_owned().await;
-            full_test(candidate, protocol, wait, repeat, cancel).await
+            full_test_with_depth(candidate, protocol, wait, repeat, depth, cancel).await
         });
     }
 
@@ -696,7 +756,8 @@ pub async fn steerings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::servers::{Candidate, parse_addr};
+    use crate::profile::TestDepth;
+    use crate::servers::{Candidate, Category, parse_addr};
 
     fn candidate(addr: &str, name: &str) -> Candidate {
         Candidate::plain(parse_addr(addr).unwrap(), name, name)
@@ -710,6 +771,10 @@ mod tests {
             transport: Protocol::Udp,
             addr: Some("1.1.1.1:53".parse().unwrap()),
             endpoint: "1.1.1.1".into(),
+            category: Category::General,
+            description: String::new(),
+            website: String::new(),
+            dot_host: None,
             cached: Some(10.0),
             uncached: Some(20.0),
             cached_min: Some(9.0),
@@ -813,5 +878,84 @@ mod tests {
         let targets = steering_targets(&rows);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].ip(), "1.1.1.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn depth_controls_cached_and_random_counts() {
+        assert_eq!(
+            lookup_plan(TestDepth {
+                cached_rounds: 2,
+                random_lookups: 3
+            }),
+            (2, 3)
+        );
+        assert_eq!(
+            lookup_plan(TestDepth {
+                cached_rounds: 0,
+                random_lookups: 999
+            }),
+            (1, 50)
+        );
+    }
+
+    #[test]
+    fn row_keeps_health_note_and_adds_metadata() {
+        let mut measured = row("Cloudflare", Note::Ok, 0);
+        measured.category = Category::Security;
+        measured.description = "Blocks malware.".into();
+        measured.website = "https://example.com".into();
+        measured.dot_host = Some("cloudflare-dns.com".into());
+        assert_eq!(measured.note, Note::Ok);
+        assert_eq!(measured.category, Category::Security);
+        let text = serde_json::to_string(&measured).unwrap();
+        let back: Row = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.note, Note::Ok);
+        assert_eq!(back.description, "Blocks malware.");
+        assert_eq!(back.dot_host.as_deref(), Some("cloudflare-dns.com"));
+    }
+
+    #[test]
+    fn bogus_signature_rcode_matrix() {
+        assert_eq!(classify_bogus_rcode(0), Some(false), "NOERROR accepts it");
+        assert_eq!(classify_bogus_rcode(2), Some(true), "SERVFAIL rejects it");
+        assert_eq!(classify_bogus_rcode(3), None, "NXDOMAIN is unknown");
+        assert_eq!(classify_bogus_rcode(5), None, "REFUSED is unknown");
+        assert_eq!(classify_bogus_rcode(255), None, "other rcodes are unknown");
+        let timeout: Option<crate::dns::Reply> = None;
+        assert_eq!(
+            timeout.and_then(|reply| classify_bogus_rcode(reply.rcode)),
+            None
+        );
+    }
+
+    #[test]
+    fn row_reads_old_json_and_defaults_new_fields() {
+        let old = r#"{
+            "id":"plain:1.1.1.1:53",
+            "provider":"Cloudflare",
+            "label":"Cloudflare",
+            "transport":"Udp",
+            "addr":"1.1.1.1:53",
+            "endpoint":"1.1.1.1",
+            "cached":10.0,
+            "uncached":20.0,
+            "cached_min":9.0,
+            "cached_p95":15.0,
+            "cached_p99":18.0,
+            "cached_mean":12.0,
+            "cached_max":20.0,
+            "cached_jitter":2.0,
+            "dnssec":true,
+            "dnssec_bogus":true,
+            "timeouts":0,
+            "note":"Hijacks",
+            "score":15.0
+        }"#;
+        let row: Row = serde_json::from_str(old).unwrap();
+        assert_eq!(row.note, Note::Hijacks);
+        assert_eq!(row.category, Category::General);
+        assert!(row.description.is_empty());
+        assert!(row.website.is_empty());
+        assert_eq!(row.dot_host, None);
     }
 }

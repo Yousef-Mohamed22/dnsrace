@@ -8,8 +8,10 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io;
+use std::io::Write as _;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
@@ -17,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bench::{Row, Steering};
 use crate::platform::AppliedDns;
+use crate::profile::{Profile, TestDepth};
 use crate::providers;
 use crate::servers::{Family, Protocol};
 
@@ -96,8 +99,7 @@ impl Theme {
 }
 
 /// The settings remembered between launches.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Settings {
     pub protocol: Protocol,
     pub family: Family,
@@ -114,6 +116,14 @@ pub struct Settings {
     pub custom: Vec<CustomResolver>,
     pub export_dir: Option<PathBuf>,
     pub theme: Theme,
+    /// The named benchmark preset. Custom keeps the user's own values.
+    pub profile: Profile,
+    /// Candidate ids starred by the user.
+    pub favorites: BTreeSet<String>,
+    /// Cached-name rounds in the full test.
+    pub cached_rounds: usize,
+    /// Random, uncacheable lookups in the full test.
+    pub random_lookups: usize,
 }
 
 impl Default for Settings {
@@ -132,7 +142,101 @@ impl Default for Settings {
             custom: Vec::new(),
             export_dir: None,
             theme: Theme::Dark,
+            profile: Profile::Balanced,
+            favorites: BTreeSet::new(),
+            cached_rounds: TestDepth::BALANCED.cached_rounds,
+            random_lookups: TestDepth::BALANCED.random_lookups,
         }
+    }
+}
+
+/// Deserialization helper: an old settings file has no profile or depth fields. When the profile
+/// is absent, infer the closest preset from the stored benchmark values; non-default values become
+/// Custom instead of being mislabelled Balanced.
+#[derive(Deserialize)]
+#[serde(default)]
+struct SettingsData {
+    protocol: Protocol,
+    family: Family,
+    timeout_ms: u64,
+    jobs: usize,
+    repeat: usize,
+    include_system: bool,
+    include_nearby: bool,
+    hostnames: String,
+    connect_port: u16,
+    selected: BTreeSet<String>,
+    custom: Vec<CustomResolver>,
+    export_dir: Option<PathBuf>,
+    theme: Theme,
+    profile: Option<Profile>,
+    favorites: BTreeSet<String>,
+    cached_rounds: Option<usize>,
+    random_lookups: Option<usize>,
+}
+
+impl Default for SettingsData {
+    fn default() -> Self {
+        let settings = Settings::default();
+        Self {
+            protocol: settings.protocol,
+            family: settings.family,
+            timeout_ms: settings.timeout_ms,
+            jobs: settings.jobs,
+            repeat: settings.repeat,
+            include_system: settings.include_system,
+            include_nearby: settings.include_nearby,
+            hostnames: settings.hostnames,
+            connect_port: settings.connect_port,
+            selected: settings.selected,
+            custom: settings.custom,
+            export_dir: settings.export_dir,
+            theme: settings.theme,
+            profile: None,
+            favorites: settings.favorites,
+            cached_rounds: None,
+            random_lookups: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Settings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data = SettingsData::deserialize(deserializer)?;
+        let depth = TestDepth {
+            cached_rounds: data
+                .cached_rounds
+                .unwrap_or(TestDepth::BALANCED.cached_rounds),
+            random_lookups: data
+                .random_lookups
+                .unwrap_or(TestDepth::BALANCED.random_lookups),
+        }
+        .clamped();
+        let profile = data
+            .profile
+            .unwrap_or_else(|| Profile::infer(data.timeout_ms, data.jobs, data.repeat, depth));
+        Ok(Settings {
+            protocol: data.protocol,
+            family: data.family,
+            timeout_ms: data.timeout_ms,
+            jobs: data.jobs,
+            repeat: data.repeat,
+            include_system: data.include_system,
+            include_nearby: data.include_nearby,
+            hostnames: data.hostnames,
+            connect_port: data.connect_port,
+            selected: data.selected,
+            custom: data.custom,
+            export_dir: data.export_dir,
+            theme: data.theme,
+            profile,
+            favorites: data.favorites,
+            cached_rounds: depth.cached_rounds,
+            random_lookups: depth.random_lookups,
+        })
     }
 }
 
@@ -157,6 +261,27 @@ impl Settings {
             .map(ToOwned::to_owned)
             .collect()
     }
+
+    /// The depth values this settings file would send to the engine.
+    pub fn depth(&self) -> TestDepth {
+        TestDepth {
+            cached_rounds: self.cached_rounds,
+            random_lookups: self.random_lookups,
+        }
+        .clamped()
+    }
+
+    /// Apply a named preset. `Custom` only changes the label and keeps the current values.
+    pub fn apply_profile(&mut self, profile: Profile) {
+        self.profile = profile;
+        if let Some(values) = profile.values() {
+            self.timeout_ms = values.timeout_ms;
+            self.jobs = values.jobs;
+            self.repeat = values.repeat;
+            self.cached_rounds = values.cached_rounds;
+            self.random_lookups = values.random_lookups;
+        }
+    }
 }
 
 /// One completed benchmark, kept in the local history.
@@ -177,6 +302,12 @@ pub struct HistoryEntry {
     /// Candidates that completed the full test. Older history files default to the row count.
     #[serde(default)]
     pub tested: usize,
+    /// The profile this run used, when the history entry was created by 0.8 or newer.
+    #[serde(default)]
+    pub profile: Option<Profile>,
+    /// The inner depth this run used, when recorded.
+    #[serde(default)]
+    pub depth: Option<TestDepth>,
 }
 
 impl HistoryEntry {
@@ -190,7 +321,7 @@ impl HistoryEntry {
             .map(|r| format!("{} ({:.1} ms)", r.label, r.score))
             .unwrap_or_else(|| "no recommendation".to_string());
         format!(
-            "{} UTC · {} · {} · {} tested",
+            "{} · {} · {} · {} tested",
             crate::util::format_time(self.timestamp),
             self.protocol.label(),
             winner,
@@ -199,7 +330,57 @@ impl HistoryEntry {
     }
 }
 
+/// Application paths supplied by a platform entry point (Android) or tests. The override is
+/// initialised once, before the first frame, so no code below it has to know whether it is on a
+/// phone or a desktop.
+#[derive(Clone, Debug)]
+struct AppPaths {
+    config_dir: PathBuf,
+    export_dir: Option<PathBuf>,
+}
+
+static APP_PATHS: Mutex<Option<AppPaths>> = Mutex::new(None);
+
+/// Point every config/export path at an application-owned directory. On Android this is called
+/// with `AndroidApp::internal_data_path()` before the GUI starts.
+pub fn init_paths(config_dir: PathBuf, export_dir: Option<PathBuf>) {
+    let _ = fs::create_dir_all(&config_dir);
+    let mut paths = APP_PATHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *paths = Some(AppPaths {
+        config_dir,
+        export_dir,
+    });
+}
+
+#[cfg(test)]
+pub fn reset_paths_for_test() {
+    let mut paths = APP_PATHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *paths = None;
+}
+
+/// Tests that change the application-wide paths must hold this lock so they cannot observe or
+/// reset each other's override.
+#[cfg(test)]
+pub fn path_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn app_paths() -> Option<AppPaths> {
+    APP_PATHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 pub fn config_dir() -> PathBuf {
+    if let Some(paths) = app_paths() {
+        return paths.config_dir;
+    }
     if let Some(dir) = env::var_os("DNSRACE_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
@@ -231,10 +412,41 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     }
     let tmp = path.with_extension("json.tmp");
     let text = serde_json::to_vec_pretty(value)?;
-    fs::write(&tmp, text)?;
-    // Windows does not allow rename over an existing file.
-    let _ = fs::remove_file(path);
-    fs::rename(tmp, path)
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(&text)?;
+    file.flush()?;
+    file.sync_all()?;
+    match replace_file(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            Err(error)
+        }
+    }
+}
+
+/// Replace `path` with `tmp`. On Unix `rename` is already atomic over an existing file. On
+/// Windows it is not, so keep the old file as a backup until the new one is in place and restore
+/// it if the final rename fails.
+fn replace_file(tmp: &Path, path: &Path) -> io::Result<()> {
+    match fs::rename(tmp, path) {
+        Ok(()) => return Ok(()),
+        Err(error) if !path.exists() => return Err(error),
+        Err(_) => {}
+    }
+    let backup = path.with_extension("json.bak");
+    let _ = fs::remove_file(&backup);
+    fs::rename(path, &backup)?;
+    match fs::rename(tmp, path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::rename(&backup, path);
+            Err(error)
+        }
+    }
 }
 
 pub fn load_settings() -> Settings {
@@ -290,24 +502,64 @@ pub fn clear_applied() -> io::Result<()> {
     }
 }
 
-/// Where an exported report goes by default. If a file with the same second-resolution
-/// timestamp already exists, a numeric suffix is added so exports never overwrite each other.
-pub fn default_export_path(extension: &str, settings: &Settings) -> PathBuf {
-    let dir = settings
-        .export_dir
-        .clone()
+fn export_dir(settings: &Settings) -> PathBuf {
+    app_paths()
+        .and_then(|paths| paths.export_dir)
+        .or_else(|| settings.export_dir.clone())
         .or_else(dirs::download_dir)
         .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let stamp = crate::util::format_stamp(SystemTime::now());
-    let base = dir.join(format!("dnsrace-{stamp}"));
-    let mut candidate = base.with_extension(extension);
-    let mut suffix = 1u32;
-    while candidate.exists() && suffix < 10_000 {
-        candidate = dir.join(format!("dnsrace-{stamp}-{suffix}.{extension}"));
-        suffix += 1;
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn export_candidate(dir: &Path, stamp: &str, extension: &str, suffix: u64) -> PathBuf {
+    if suffix == 0 {
+        dir.join(format!("dnsrace-{stamp}.{extension}"))
+    } else {
+        dir.join(format!("dnsrace-{stamp}-{suffix}.{extension}"))
     }
-    candidate
+}
+
+/// Where an exported report is suggested. If a file with the same second-resolution timestamp
+/// already exists, a numeric suffix is added. The actual write reserves the path with
+/// `create_new`, so this is only a suggestion.
+pub fn default_export_path(extension: &str, settings: &Settings) -> PathBuf {
+    let dir = export_dir(settings);
+    let stamp = crate::util::format_stamp(SystemTime::now());
+    let mut suffix = 0u64;
+    loop {
+        let candidate = export_candidate(&dir, &stamp, extension, suffix);
+        if !candidate.exists() {
+            return candidate;
+        }
+        suffix = suffix.saturating_add(1);
+    }
+}
+
+/// Write a report to a fresh file. `create_new` closes the race between choosing a name and
+/// writing it, and the suffix retry never caps out, so an existing export is never overwritten.
+pub fn write_export(extension: &str, settings: &Settings, contents: &[u8]) -> io::Result<PathBuf> {
+    let dir = export_dir(settings);
+    fs::create_dir_all(&dir)?;
+    let stamp = crate::util::format_stamp(SystemTime::now());
+    let mut suffix = 0u64;
+    loop {
+        let candidate = export_candidate(&dir, &stamp, extension, suffix);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                file.write_all(contents)?;
+                file.flush()?;
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                suffix = suffix.saturating_add(1);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// A short relative description of the last applied change, for the banner in the interface.
@@ -338,6 +590,10 @@ mod tests {
             transport: Protocol::Udp,
             addr: Some("1.1.1.1:53".parse().unwrap()),
             endpoint: "1.1.1.1".into(),
+            category: crate::servers::Category::General,
+            description: String::new(),
+            website: String::new(),
+            dot_host: None,
             cached: Some(10.0),
             uncached: Some(20.0),
             cached_min: Some(9.0),
@@ -423,9 +679,21 @@ mod tests {
             steerings: Vec::new(),
             scanned: 1,
             tested: 1,
+            profile: Some(Profile::Balanced),
+            depth: Some(TestDepth::BALANCED),
         };
         assert!(entry.winner().is_some());
         assert!(entry.label().contains("Cloudflare"));
+        assert!(
+            entry.label().contains("22:13 UTC ·"),
+            "the label keeps one UTC marker: {}",
+            entry.label()
+        );
+        assert!(
+            !entry.label().contains("UTC UTC"),
+            "the label must not repeat UTC: {}",
+            entry.label()
+        );
     }
 
     #[test]
@@ -441,6 +709,8 @@ mod tests {
             steerings: Vec::new(),
             scanned: 0,
             tested: 0,
+            profile: None,
+            depth: None,
         };
         let mut list = vec![entry(1), entry(3), entry(2)];
         list.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
@@ -493,15 +763,7 @@ mod tests {
 
     #[test]
     fn export_paths_do_not_overwrite_an_existing_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "dnsrace-export-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("export-paths");
         let settings = Settings {
             export_dir: Some(dir.clone()),
             ..Settings::default()
@@ -511,6 +773,135 @@ mod tests {
         let second = default_export_path("json", &settings);
         assert_ne!(first, second);
         assert!(!second.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dnsrace-config-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn settings_roundtrip_keeps_profile_favorites_and_depth() {
+        let mut settings = Settings {
+            profile: Profile::Thorough,
+            cached_rounds: 4,
+            random_lookups: 8,
+            ..Settings::default()
+        };
+        settings.favorites.insert("plain:1.1.1.1:53".into());
+        let text = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.profile, Profile::Thorough);
+        assert_eq!(
+            back.depth(),
+            TestDepth {
+                cached_rounds: 4,
+                random_lookups: 8
+            }
+        );
+        assert!(back.favorites.contains("plain:1.1.1.1:53"));
+    }
+
+    #[test]
+    fn old_settings_json_loads_balanced_defaults() {
+        let settings: Settings = serde_json::from_str(r#"{"protocol":"Doh"}"#).unwrap();
+        assert_eq!(settings.profile, Profile::Balanced);
+        assert_eq!(settings.depth(), TestDepth::BALANCED);
+        assert!(settings.favorites.is_empty());
+    }
+
+    #[test]
+    fn old_settings_with_non_default_benchmark_values_become_custom() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"timeout_ms":2500,"jobs":7,"repeat":3,"protocol":"Doh"}"#)
+                .unwrap();
+        assert_eq!(settings.profile, Profile::Custom);
+        assert_eq!(settings.timeout_ms, 2500);
+        assert_eq!(settings.jobs, 7);
+        assert_eq!(settings.repeat, 3);
+    }
+
+    #[test]
+    fn explicit_old_profile_is_preserved() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"profile":"Quick","timeout_ms":2500}"#).unwrap();
+        assert_eq!(settings.profile, Profile::Quick);
+    }
+
+    #[test]
+    fn custom_depth_survives_roundtrip() {
+        let settings = Settings {
+            profile: Profile::Custom,
+            timeout_ms: 900,
+            jobs: 9,
+            repeat: 2,
+            cached_rounds: 6,
+            random_lookups: 11,
+            ..Settings::default()
+        };
+        let back: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(back.profile, Profile::Custom);
+        assert_eq!(
+            back.depth(),
+            TestDepth {
+                cached_rounds: 6,
+                random_lookups: 11
+            }
+        );
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let dir = temp_dir("atomic");
+        let path = dir.join("settings.json");
+        write_json(&path, &"first").unwrap();
+        write_json(&path, &"second").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "\"second\"");
+        assert!(!path.with_extension("json.tmp").exists());
+        assert!(!path.with_extension("json.bak").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_writer_never_overwrites() {
+        let dir = temp_dir("export-writer");
+        let settings = Settings {
+            export_dir: Some(dir.clone()),
+            ..Settings::default()
+        };
+        let first = write_export("json", &settings, b"first").unwrap();
+        let second = write_export("json", &settings, b"second").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fs::read(&first).unwrap(), b"first");
+        assert_eq!(fs::read(&second).unwrap(), b"second");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn path_override_is_used_by_config_dir() {
+        let _guard = path_test_lock();
+        let dir = temp_dir("override");
+        let config = dir.join("config");
+        let export = dir.join("export");
+        init_paths(config.clone(), Some(export.clone()));
+        assert_eq!(config_dir(), config);
+        assert_eq!(settings_path(), config.join("settings.json"));
+        let settings = Settings::default();
+        assert_eq!(
+            default_export_path("json", &settings).parent(),
+            Some(export.as_path())
+        );
+        reset_paths_for_test();
         let _ = fs::remove_dir_all(&dir);
     }
 }

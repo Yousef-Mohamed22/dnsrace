@@ -444,6 +444,10 @@ mod tests {
             transport: Protocol::Udp,
             addr: Some("1.1.1.1:53".parse().unwrap()),
             endpoint: "1.1.1.1".into(),
+            category: crate::servers::Category::General,
+            description: String::new(),
+            website: String::new(),
+            dot_host: None,
             cached: Some(12.34),
             uncached: Some(23.45),
             cached_min: Some(10.0),
@@ -476,6 +480,8 @@ mod tests {
             }],
             scanned: 1,
             tested: 1,
+            profile: Some(crate::profile::Profile::Balanced),
+            depth: Some(crate::profile::TestDepth::BALANCED),
         }
     }
 

@@ -9,66 +9,85 @@ list from the internet cannot tell you which one is fastest for you. dnsrace mea
 resolvers from your own machine, ranks them by real lookup latency, checks their DNS security
 behaviour, and can switch your system to the winner.
 
-**dnsrace 0.7.0 is a desktop application.** There is no terminal or CLI mode: launch the app,
-choose the servers you want, and use the window. Linux x86_64 and aarch64 AppImages are
-provided, along with Windows and macOS builds.
+**dnsrace 0.8.0 runs on desktop and Android 8.0+.** The desktop app can apply and revert DNS.
+Android is a benchmark and guided-setup platform: dnsrace measures resolvers and then helps you
+enter the winner in Private DNS (Android 9+) or per-network Wi-Fi DNS (Android 8.0–8.1). There
+is no iOS or other Apple phone target, no terminal or CLI mode, and no VPN or background
+service.
 
 ## Features
 
-- **Automatic DNS detection on Linux, Windows and macOS.** dnsrace reads the resolvers your
-  machine is actually using, shows the active interface, gateway and detection source, and labels
-  known addresses with their provider (for example `1.1.1.1 (Cloudflare)`).
-- **A native desktop interface** with a searchable server picker, protocol and address-family
-  filters, live progress, a sortable results table, and a plain-language recommendation.
+- **One adaptive interface for desktop and phone.** The desktop uses a navigation rail, a dense
+  server table and a detail pane. Android uses an app bar, bottom navigation, 48 dp touch
+  controls, server cards and bottom sheets. The phone layout reflows automatically and fits
+  360 dp and 320 dp screens without horizontal scrolling.
+- **Android 8.0 and newer.** Minimum API 26, target API 36, with `arm64-v8a`,
+  `armeabi-v7a` and `x86_64` native libraries in one APK. The app is 100% Rust; there is no
+  Java or Kotlin application code.
+- **Guided Private DNS setup.** Android 9+ gets a measured DoT hostname (or a clearly labelled
+  provider hostname when only metadata is available) and a shortcut to the Private DNS screen.
+  Android 8.0–8.1 gets per-network Wi-Fi DNS steps instead.
+- **Automatic DNS detection on Linux, Windows, macOS and Android.** dnsrace reads the resolvers
+  your device is actually using, shows the active interface, gateway and detection source, and
+  labels known addresses with their provider (for example `1.1.1.1 (Cloudflare)`).
+- **Test profiles.** Quick, Balanced, Thorough or Custom. A profile sets timeout, jobs, repeat,
+  cached rounds and random lookups; editing any value switches to Custom. Android defaults to
+  Balanced + DoT; desktop defaults to Balanced + UDP.
+- **Favourites.** Star resolvers in Servers or a result card, then filter by favourites or run
+  **Test favourites**.
+- **Explained recommendations.** See the fastest recommendable resolver, the fastest plain
+  resolver desktop can apply, the fastest encrypted resolver measured in this run, the delta
+  against your current DNS, close-call warnings, and plain-language reasons.
+- **History trends and detailed metrics.** A winner-score sparkline, profile and depth in every
+  history entry, and cached/uncached latency, jitter, timeouts, DNSSEC, hijack status and
+  security details for every resolver.
 - **Compare against what you have.** The recommendation marks a resolver that is already
   configured as **IN USE** and shows which current DNS addresses an apply would replace.
-- **Test all, test selected, or test the current DNS.** Scan the whole catalogue for the current
-  protocol, compare only the resolvers you have checked, or benchmark exactly the servers this
-  machine uses.
-- **UDP, TCP, DNS-over-TLS and DNS-over-HTTPS.** DoH uses RFC 8484 wire-format queries and supports
-  every query type used by the benchmark, including AAAA and DNSSEC probes. Some providers that
-  only publish HTTP/2 DoH endpoints are included through their DoT endpoint.
-- **Cached and uncached measurements.** Every server gets an untimed warm-up, then popular-domain
-  and random-name lookups. The table shows medians, jitter, p95/p99, timeouts and a combined
-  score.
+- **Test all, test selected, test favourites, or test the current DNS.**
+- **UDP, TCP, DNS-over-TLS and DNS-over-HTTPS.** DoH uses RFC 8484 wire-format queries and
+  supports every query type used by the benchmark, including AAAA and DNSSEC probes.
 - **DNS security checks.** dnsrace checks DNSSEC validation and deliberately broken signatures,
   plus NXDOMAIN hijacking. A resolver that accepts a bogus DNSSEC answer is never recommended or
   applied.
 - **Apply and revert on Linux, Windows and macOS.** The previous resolver configuration is saved
   before a change, and the app can restore it later.
-- **History and reports.** The last 20 runs are kept locally and can be reopened or exported as
-  JSON, CSV or a self-contained HTML report. Reports record how many resolvers were scanned and
-  fully tested.
+- **History and reports.** The last 20 runs are kept locally and can be reopened. Desktop export
+  supports JSON, CSV, HTML and a text summary; Android shares a text report through the system
+  share sheet. Reports record the test profile and depth.
 - **Eight themes:** System, Dark, Light, Midnight, Nord, Solarized Light, Dracula and High
   contrast. **System** follows the operating system's light/dark preference.
 - **Custom resolvers, steering checks and persistent settings.**
-- **No telemetry, no account and no background service.**
+- **No telemetry, no account, no root and no background service.**
 
 ## Download
 
 | Platform | File |
 | --- | --- |
-| Linux x86_64 | `dnsrace-0.7.0-x86_64.AppImage` |
-| Linux aarch64 | `dnsrace-0.7.0-aarch64.AppImage` |
-| Windows x86_64 | `dnsrace-0.7.0-windows-x86_64.zip` |
-| macOS Intel | `dnsrace-0.7.0-macos-x86_64.zip` |
-| macOS Apple silicon | `dnsrace-0.7.0-macos-aarch64.zip` |
+| Linux x86_64 | `dnsrace-0.8.0-x86_64.AppImage` |
+| Linux aarch64 | `dnsrace-0.8.0-aarch64.AppImage` |
+| Windows x86_64 | `dnsrace-0.8.0-windows-x86_64.zip` |
+| macOS Intel | `dnsrace-0.8.0-macos-x86_64.zip` |
+| macOS Apple silicon | `dnsrace-0.8.0-macos-aarch64.zip` |
+| Android 8.0+ | `dnsrace-0.8.0-android-release-debugkey.apk` |
 
-Every release includes `SHA256SUMS.txt`. AppImages also have individual `.sha256` files. Pushes
-to `main` produce separate snapshot builds from the **Main snapshot** workflow; those artifacts
-are development snapshots, not tagged releases.
+Every release includes `SHA256SUMS.txt`; AppImages and the Android APK also have individual
+`.sha256` files. Pushes to `main` produce separate snapshot builds from the **Main snapshot**
+workflow; those artifacts are development snapshots, not tagged releases.
+
+The 0.8.0 APK is signed with the Android debug keystore, not a Play Store release key. It is
+fine for sideloading and testing.
 
 ### Linux
 
 ```sh
-chmod +x dnsrace-0.7.0-x86_64.AppImage
-./dnsrace-0.7.0-x86_64.AppImage
+chmod +x dnsrace-0.8.0-x86_64.AppImage
+./dnsrace-0.8.0-x86_64.AppImage
 ```
 
 If your system does not have FUSE, use the AppImage's extract-and-run mode:
 
 ```sh
-./dnsrace-0.7.0-x86_64.AppImage --appimage-extract-and-run
+./dnsrace-0.8.0-x86_64.AppImage --appimage-extract-and-run
 ```
 
 The x86_64 AppImage is built on Ubuntu 22.04 and the aarch64 AppImage on Ubuntu 24.04; both
@@ -95,32 +114,52 @@ xattr -dr com.apple.quarantine dnsrace.app
 Applying DNS uses `networksetup` and asks for administrator approval. macOS support is provided
 on a best-effort basis.
 
+### Android
+
+1. Download `dnsrace-0.8.0-android-release-debugkey.apk`.
+2. Allow installs from your browser or file manager when Android asks.
+3. Run a benchmark, open a resolver, and use **Set up this resolver** to follow the Private DNS
+   (Android 9+) or Wi-Fi DNS (Android 8.0–8.1) steps.
+
+Or install over USB:
+
+```sh
+adb install -r dnsrace-0.8.0-android-release-debugkey.apk
+```
+
+Android does not let a normal app change Private DNS silently. dnsrace does not request a VPN,
+root, or a background service; it measures resolvers and hands you the value to enter. Reports
+are shared as text, so the app needs no storage permission or export folder.
+
 ## Using dnsrace
 
 1. **Check what you are using.** dnsrace detects the system's DNS servers in the background at
-   startup. The toolbar and sidebar show the active interface, detection source and provider-aware
-   addresses. Use **Refresh** after changing networks, **Test current DNS** to benchmark exactly
-   those servers, or **Copy** to copy the addresses.
-2. **Pick a protocol and address family.** UDP is the normal choice. TCP helps on networks that
-   block or mangle UDP port 53. DoT and DoH test encrypted resolvers but cannot be applied as the
-   system resolver.
-3. **Choose servers.** Use the search, health and category filters, tick individual rows, use
-   **Select visible**, or keep the **Default selection**. **Test selected** benchmarks only the
-   checked servers; **Test all** benchmarks the entire catalogue for the current protocol.
+   startup. The current-DNS card shows the active interface, detection source and provider-aware
+   addresses. Use **Refresh detection** after changing networks, **Test current** to benchmark
+   exactly those servers, or **Copy current DNS** on desktop to copy the addresses.
+2. **Pick a protocol and address family.** UDP is the normal desktop choice. TCP helps on
+   networks that block or mangle UDP port 53. DoT is the default on a fresh Android install. DoT
+   and DoH test encrypted resolvers; desktop cannot apply them as the system resolver.
+3. **Choose servers.** Search, filter by category, transport, address family or favourites, tick
+   individual rows, or use the default selection. **Test selected** benchmarks only the checked
+   servers; **Test all** benchmarks the entire catalogue for the current protocol.
 4. **Start the run.** The app quick-scans every candidate, then fully tests the responders. Rows
    appear as servers finish, so you can watch progress instead of waiting for a blank window.
-   Sort by any column heading, and click it again to reverse the order.
-5. **Review the recommendation.** The top card shows the fastest recommendable resolver, its
-   cached/uncached latency and DNSSEC status. It marks a resolver that is already configured as
-   **IN USE** and lists the current DNS addresses an apply would replace. Click any row or **Use**
-   to choose a different resolver; the recommendation card follows your choice.
-6. **Apply or revert.** **Apply to system** asks for confirmation and then changes the active
-   connection. The previous settings are written to `applied.json`, and the banner or the
-   **Revert** button restores them.
+   On desktop, sort by any column heading and click it again to reverse the order.
+5. **Review the recommendation.** The card shows the fastest recommendable resolver, its
+   cached/uncached latency, DNSSEC status, reasons, and the delta against your current DNS. It
+   marks a resolver that is already configured as **IN USE**. Choose another row with **Use this
+   resolver** on desktop or **Set up this resolver** on Android; the card follows your choice.
+6. **Act on the result.** On desktop, **Apply to system** asks for confirmation and changes the
+   active connection. The previous settings are written to `applied.json`, and **Restore
+   previous DNS** brings them back. On Android, follow the setup guide and enter the hostname or
+   addresses in system settings.
 
-Only plain DNS resolvers on port 53 can be applied. DoT and DoH entries are benchmark-only.
-A resolver with a bogus DNSSEC result is blocked from applying; other unhealthy results can be
-applied with a warning if you explicitly choose them.
+Only plain DNS resolvers on port 53 can be applied. DoT and DoH entries are benchmark-only on
+desktop. A resolver with a bogus DNSSEC result is blocked from applying; other unhealthy results
+can be applied with a warning if you explicitly choose them. On Android, a selection that only
+has a provider's DoT hostname is labelled **“provider's DoT hostname — not measured in this
+run”** and the guide offers a DoT benchmark.
 
 ### Automatic detection
 
@@ -129,15 +168,18 @@ applied with a warning if you explicitly choose them.
 | Linux | systemd-resolved per-link data, the active NetworkManager connection, the default route, `/etc/resolv.conf` and systemd-resolved's upstream file. |
 | Windows | `Get-NetIPConfiguration` through PowerShell, with a `pwsh` fallback and a language-independent registry fallback. |
 | macOS | `scutil --dns`, `networksetup` service order and DNS values, plus the default route. |
+| Android | `ConnectivityManager` link properties and the active network. |
 
 Detection runs asynchronously, so a slow or missing platform command never delays the first frame.
 When no source yields an address, the interface says so and the rest of the app still works.
 
 ### Themes and shortcuts
 
-Choose a theme in Settings or from the quick picker in the toolbar: **System**, **Dark**,
-**Light**, **Midnight**, **Nord**, **Solarized Light**, **Dracula** or **High contrast**.
-**System** follows the operating system's light/dark preference.
+Choose a theme in Settings: **System**, **Dark**, **Light**, **Midnight**, **Nord**,
+**Solarized Light**, **Dracula** or **High contrast**. **System** follows the operating system's
+light/dark preference. All eight themes remain on both platforms.
+
+Desktop shortcuts:
 
 | Shortcut | Action |
 | --- | --- |
@@ -145,7 +187,7 @@ Choose a theme in Settings or from the quick picker in the toolbar: **System**, 
 | Ctrl/Cmd+Enter | Test selected |
 | Ctrl/Cmd+Shift+Enter | Test all |
 | Ctrl/Cmd+E | Export HTML |
-| Esc | Cancel the current run |
+| Esc | Close the topmost dialog, or cancel the current run |
 
 ### What the columns mean
 
@@ -166,15 +208,17 @@ Settings, history and the saved applied state live in the platform config direct
 | Linux | `~/.config/dnsrace/` |
 | Windows | `%APPDATA%\dnsrace\` |
 | macOS | `~/Library/Application Support/dnsrace/` |
+| Android | app-private internal storage |
 
 Files are `settings.json`, `history.json` and `applied.json`. History is capped at 20 runs.
-Set `DNSRACE_CONFIG_DIR` to use a different directory, which is useful for portable or test
-setups.
+Set `DNSRACE_CONFIG_DIR` on desktop to use a different directory, which is useful for portable or
+test setups. Android uses its internal data path directly; reports leave the app through the
+share sheet rather than a file path.
 
 dnsrace does not send telemetry. During normal use it contacts the resolver endpoints being
 tested and asks Cloudflare's 1.1.1.1 for the DNS CHAOS `id.server` record used by the edge
 display. Optional features make additional requests: Cloudflare's HTTPS trace endpoint and
-public-dns.info when **Add nearby-country open resolvers** is enabled. Exports are written to
+public-dns.info when **Include nearby open resolvers** is enabled. Desktop exports are written to
 Downloads by default, or to the folder chosen in Settings.
 
 ## Building from source
@@ -195,12 +239,33 @@ cargo build --release --locked
 Build a Linux AppImage locally:
 
 ```sh
-./packaging/build-appimage.sh 0.7.0 x86_64 target/release/dnsrace dist
+./packaging/build-appimage.sh 0.8.0 x86_64 target/release/dnsrace dist
 ```
 
 The script stages an AppDir, validates the desktop entry and AppStream metadata when the tools
 are installed, downloads `appimagetool` when necessary, and writes
-`dist/dnsrace-0.7.0-x86_64.AppImage` plus its `.sha256`.
+`dist/dnsrace-0.8.0-x86_64.AppImage` plus its `.sha256`.
+
+### Android APK
+
+You need Java 17, Android SDK platform 36, build-tools 36.0.0, NDK **30.0.16248370**, and
+`cargo-apk` 0.10.0. NDK r27 is too old for compileSdk 36.
+
+```sh
+rustup target add armv7-linux-androideabi aarch64-linux-android x86_64-linux-android
+cargo install cargo-apk --version 0.10.0 --locked
+
+export ANDROID_HOME="$HOME/Android/Sdk"
+export ANDROID_NDK_HOME="$HOME/Android/android-ndk-r30"
+
+cargo apk build --lib              # debug APK
+cargo apk build --lib --release    # release APK
+```
+
+`--lib` is required because the crate also has a desktop binary. The release build is signed
+with `CARGO_APK_RELEASE_KEYSTORE`, `CARGO_APK_RELEASE_KEYSTORE_PASSWORD`,
+`CARGO_APK_RELEASE_KEY_ALIAS` and `CARGO_APK_RELEASE_KEY_PASSWORD` when those are set; the 0.8.0
+release artifact uses the debug keystore unless CI secrets provide a private key.
 
 Run the test suite and lints:
 
@@ -211,19 +276,26 @@ cargo clippy --all-targets --locked -- -D warnings
 ```
 
 The engine and platform parsers are covered by unit and integration tests; the integration tests
-use simulated DNS servers on loopback and do not open a window.
+use simulated DNS servers on loopback and do not open a window. The GUI tests use
+`egui_kittest` to render every page at desktop, phone and landscape sizes, click the labelled
+controls, and check accessibility, touch sizes, large text and safe areas.
 
 ## Project layout
 
-- `src/gui.rs` — the desktop interface and application state.
+- `src/gui/` — the adaptive interface: `app.rs` (state and effects), `state.rs`, `actions.rs`,
+  `backend.rs`, `desktop.rs`, `mobile.rs`, `pages/`, `modals.rs`, `components.rs`, `theme.rs`,
+  `icons.rs` and `tests/`.
 - `src/engine.rs` — the benchmark pipeline shared by the GUI and tests.
 - `src/bench.rs` — quick scan, full tests, DNSSEC, hijacking and steering.
 - `src/providers.rs` — the built-in resolver catalogue and provider identification.
+- `src/recommend.rs` — the recommendation model, deltas, close calls and reasons.
+- `src/android_guide.rs` — the Private DNS and Wi-Fi DNS setup guide.
+- `src/android.rs` — the Android JNI host, safe-area insets, sharing and intents.
 - `src/system.rs` — cross-platform current-DNS detection and parsers.
 - `src/platform.rs` — apply/revert implementations for Linux, Windows and macOS.
-- `src/report.rs` — JSON, CSV and HTML exports.
+- `src/report.rs` — JSON, CSV, HTML and summary reports.
 - `src/config.rs` — settings, history and applied-state persistence.
-- `packaging/` — AppImage assets and build script.
+- `packaging/` — AppImage assets, Android resources and the icon build script.
 
 ## License
 

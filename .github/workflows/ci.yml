@@ -125,3 +125,55 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
       - name: Build release binary
         run: cargo build --release --locked
+
+  android:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: armv7-linux-androideabi,aarch64-linux-android,x86_64-linux-android
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android platform, build tools, and NDK
+        run: |
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;30.0.16248370"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/30.0.16248370" >> "$GITHUB_ENV"
+          echo "$ANDROID_SDK_ROOT/build-tools/36.0.0" >> "$GITHUB_PATH"
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --version 0.10.0 --locked
+      - name: Build debug APK
+        run: cargo apk build --lib
+      - name: Verify APK manifest and native code
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          apk=target/debug/apk/dnsrace.apk
+          test -f "$apk"
+          aapt2 dump badging "$apk" | tee badging.txt
+          grep -q "package: name='io.github.yousef_mohamed22.dnsrace'" badging.txt
+          grep -q "versionName='${version}'" badging.txt
+          grep -q "minSdkVersion:'26'" badging.txt
+          grep -q "targetSdkVersion:'36'" badging.txt
+          grep -q "uses-permission: name='android.permission.INTERNET'" badging.txt
+          grep -q "uses-permission: name='android.permission.ACCESS_NETWORK_STATE'" badging.txt
+          test "$(grep -c '^uses-permission:' badging.txt)" -eq 2
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            grep -q "'${abi}'" badging.txt
+          done
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-android-debug
+          path: target/debug/apk/dnsrace.apk
+          if-no-files-found: error

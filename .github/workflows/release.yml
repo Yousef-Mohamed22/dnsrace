@@ -240,9 +240,92 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  release-android:
+    name: Android APK
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: armv7-linux-androideabi,aarch64-linux-android,x86_64-linux-android
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform, build tools, and NDK
+        run: |
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;30.0.16248370"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/30.0.16248370" >> "$GITHUB_ENV"
+          echo "$ANDROID_SDK_ROOT/build-tools/36.0.0" >> "$GITHUB_PATH"
+
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --version 0.10.0 --locked
+
+      - name: Prepare signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            {
+              echo "CARGO_APK_RELEASE_KEYSTORE=$RUNNER_TEMP/release.keystore"
+              echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+              echo "CARGO_APK_RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}"
+              echo "CARGO_APK_RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}"
+              echo "ANDROID_APK_SUFFIX=android"
+            } >> "$GITHUB_ENV"
+          else
+            keytool -genkeypair -noprompt \
+              -keystore "$RUNNER_TEMP/debug.keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            {
+              echo "CARGO_APK_RELEASE_KEYSTORE=$RUNNER_TEMP/debug.keystore"
+              echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android"
+              echo "CARGO_APK_RELEASE_KEY_ALIAS=androiddebugkey"
+              echo "CARGO_APK_RELEASE_KEY_PASSWORD=android"
+              echo "ANDROID_APK_SUFFIX=android-release-debugkey"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Build release APK
+        run: cargo apk build --lib --release
+
+      - name: Stage APK
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          apk="dist/dnsrace-${version}-${ANDROID_APK_SUFFIX}.apk"
+          cp target/release/apk/dnsrace.apk "$apk"
+          sha256sum "$apk" | tee "$apk.sha256"
+          aapt2 dump badging "$apk" \
+            | grep -E "^(package|sdkVersion|targetSdkVersion|uses-permission|native-code):"
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsrace-android
+          path: dist/dnsrace-*-android*.apk*
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: [release-linux, release-windows, release-macos]
+    needs: [release-linux, release-windows, release-macos, release-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -257,7 +340,7 @@ jobs:
         run: |
           cd dist
           : > SHA256SUMS.txt
-          for file in dnsrace-*.AppImage dnsrace-*.zip; do
+          for file in dnsrace-*.AppImage dnsrace-*.zip dnsrace-*.apk; do
             [ -f "$file" ] || continue
             sha256sum "$file" >> SHA256SUMS.txt
           done
@@ -280,5 +363,7 @@ jobs:
             dist/dnsrace-*.AppImage.sha256
             dist/dnsrace-*-windows-x86_64.zip
             dist/dnsrace-*-macos-*.zip
+            dist/dnsrace-*-android*.apk
+            dist/dnsrace-*-android*.apk.sha256
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true

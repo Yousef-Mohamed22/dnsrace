@@ -9,6 +9,9 @@
 //! data, a Windows registry fallback when PowerShell is unavailable, and a macOS `networksetup`
 //! fallback when `scutil` returns nothing.
 
+// Android never runs these commands; its system DNS comes from the JNI host instead.
+#![cfg_attr(target_os = "android", allow(dead_code, unused_imports))]
+
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::{Command, Stdio};
@@ -43,7 +46,7 @@ pub fn detect() -> SystemInfo {
 
     #[cfg(target_os = "windows")]
     detect_windows(&mut info);
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(target_os = "linux")]
     detect_linux(&mut info);
     #[cfg(target_os = "macos")]
     detect_macos(&mut info);
@@ -68,7 +71,7 @@ fn add_source(info: &mut SystemInfo, source: &str) {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 fn detect_linux(info: &mut SystemInfo) {
     info.interface = default_linux_interface();
     info.gateway = std::fs::read_to_string("/proc/net/route")
@@ -141,7 +144,7 @@ fn detect_linux(info: &mut SystemInfo) {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 fn default_linux_interface() -> Option<String> {
     if let Some(text) = run("ip", &["route", "show", "default"])
         && let Some(device) = parse_default_device(&text)

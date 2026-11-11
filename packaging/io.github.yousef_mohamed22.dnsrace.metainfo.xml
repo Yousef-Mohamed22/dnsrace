@@ -6,14 +6,17 @@
   <name>dnsrace</name>
   <summary>Find and apply the fastest DNS resolver for your connection</summary>
   <description>
-    <p>dnsrace measures public DNS resolvers from your own connection and ranks them by cached and uncached lookup latency. It detects the DNS servers your system is already using, supports plain DNS over UDP or TCP, DNS-over-TLS and DNS-over-HTTPS, checks DNSSEC behaviour and NXDOMAIN hijacking, and can optionally show where hostnames are steered.</p>
+    <p>dnsrace measures public DNS resolvers from your own connection and ranks them by cached and uncached lookup latency. It detects the DNS servers your system is already using, supports plain DNS over UDP or TCP, DNS-over-TLS and DNS-over-HTTPS, checks DNSSEC behaviour and NXDOMAIN hijacking, and can optionally show where hostnames are steered. The adaptive interface runs on desktop and on Android 8.0 and newer.</p>
     <ul>
       <li>Detect the current system DNS, with provider names, interface and detection source.</li>
-      <li>Test every built-in resolver, only the servers you select, or the current DNS.</li>
+      <li>Use Quick, Balanced, Thorough or Custom test profiles, and star favourites for repeat runs.</li>
+      <li>Test every built-in resolver, only the servers you select, favourites, or the current DNS.</li>
       <li>Compare popular-domain latency with uncached lookups, jitter and timeouts.</li>
       <li>Apply the winner on Linux, Windows or macOS, with a saved state for reverting.</li>
+      <li>Review explained recommendations, current-DNS deltas, close calls and history trends.</li>
       <li>Sort and filter results, choose from eight themes, and keep a local run history.</li>
-      <li>Export JSON, CSV or HTML reports. No telemetry, account or background service.</li>
+      <li>Export JSON, CSV or HTML reports on desktop; share text reports on Android.</li>
+      <li>No telemetry, account, root or background service.</li>
     </ul>
   </description>
   <launchable type="desktop-id">io.github.yousef_mohamed22.dnsrace.desktop</launchable>
@@ -33,6 +36,11 @@
   </keywords>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.8.0" date="2026-11-11">
+      <description>
+        <p>A large release with an adaptive desktop and Android interface. Android 8.0 and newer can benchmark from the phone itself and receive guided Private DNS or Wi-Fi DNS setup without root, a VPN service or a background service. Adds test profiles, favourites, explained recommendations with current-DNS deltas, recent-history trends, richer run metrics, a new icon, eight themes, responsive phone layouts with touch-sized controls, and a debug-signed APK alongside the desktop builds.</p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-10-30">
       <description>
         <p>Automatic cross-platform DNS detection, provider-aware addresses, eight themes, sortable columns, health and category filters, current-DNS comparison, keyboard shortcuts and collision-safe exports. Fixes building with current rustls-native-certs, validates DNS reply questions, and adds DoH support for AAAA and DNSSEC queries.</p>

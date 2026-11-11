@@ -1,6 +1,6 @@
 //! dnsrace desktop entry point.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
 // Release builds on Windows are GUI applications: no console window appears behind the app.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

@@ -13,9 +13,12 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::bench::{self, Row, Steering};
+use crate::profile::{Profile, TestDepth};
 use crate::providers;
 use crate::servers::{Candidate, Family, OTHER, Pool, Protocol, fmt_addr, is_usable_ip};
-use crate::system::{self, SystemInfo};
+#[cfg(not(target_os = "android"))]
+use crate::system;
+use crate::system::SystemInfo;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -71,6 +74,13 @@ pub struct RunRequest {
     pub connect_port: u16,
     pub include_system: bool,
     pub include_nearby: bool,
+    /// Platform-supplied system DNS. `None` asks the engine to detect it; on Android the app
+    /// always supplies a value (possibly empty) so no Linux command is ever run on a phone.
+    pub environment: Option<SystemInfo>,
+    /// The preset this run was started from.
+    pub profile: Profile,
+    /// The inner round/lookup counts for this run.
+    pub depth: TestDepth,
 }
 
 impl Default for RunRequest {
@@ -86,6 +96,9 @@ impl Default for RunRequest {
             connect_port: 443,
             include_system: true,
             include_nearby: false,
+            environment: None,
+            profile: Profile::Balanced,
+            depth: TestDepth::BALANCED,
         }
     }
 }
@@ -103,6 +116,12 @@ pub struct RunResult {
     pub scanned: usize,
     /// How many candidates made it into the full test.
     pub tested: usize,
+    /// The profile this run used. Older history files have no profile.
+    #[serde(default)]
+    pub profile: Option<Profile>,
+    /// The inner depth this run used. Older history files have no depth.
+    #[serde(default)]
+    pub depth: Option<TestDepth>,
 }
 
 impl RunResult {
@@ -125,11 +144,15 @@ pub async fn run(request: RunRequest, events: Sender<RunEvent>, cancel: Arc<Atom
     let started = Instant::now();
 
     // Find the system's current DNS and the Cloudflare edge before testing, so the interface can
-    // explain what is being compared.
-    let info = if request.include_system {
-        let info = tokio::task::spawn_blocking(system::detect)
-            .await
-            .unwrap_or_default();
+    // explain what is being compared. A supplied environment (Android) is used as-is; detection
+    // only runs on desktop and never calls Linux commands on a phone.
+    let detected = if request.include_system && request.environment.is_none() {
+        tokio::task::spawn_blocking(detect_environment).await.ok()
+    } else {
+        None
+    };
+    let info = environment_for(&request, || detected.clone().unwrap_or_default());
+    let info = if let Some(info) = info {
         let data_center = bench::cloudflare_data_center().await;
         let _ = events.send(RunEvent::Detected {
             current_dns: info.dns.clone(),
@@ -186,6 +209,8 @@ pub async fn run(request: RunRequest, events: Sender<RunEvent>, cancel: Arc<Atom
             steerings: Vec::new(),
             scanned: 0,
             tested: 0,
+            profile: Some(request.profile),
+            depth: Some(request.depth),
         }));
         return;
     }
@@ -224,6 +249,8 @@ pub async fn run(request: RunRequest, events: Sender<RunEvent>, cancel: Arc<Atom
             steerings: Vec::new(),
             scanned: total_scan,
             tested: 0,
+            profile: Some(request.profile),
+            depth: Some(request.depth),
         }));
         return;
     }
@@ -249,6 +276,7 @@ pub async fn run(request: RunRequest, events: Sender<RunEvent>, cancel: Arc<Atom
         request.jobs,
         request.wait,
         request.repeat,
+        request.depth,
         cancel.clone(),
         move |row| {
             let _ = row_events.send(RunEvent::Row(row));
@@ -274,6 +302,8 @@ pub async fn run(request: RunRequest, events: Sender<RunEvent>, cancel: Arc<Atom
             steerings: Vec::new(),
             scanned: total_scan,
             tested,
+            profile: Some(request.profile),
+            depth: Some(request.depth),
         }));
         return;
     }
@@ -308,6 +338,8 @@ pub async fn run(request: RunRequest, events: Sender<RunEvent>, cancel: Arc<Atom
         steerings,
         scanned: total_scan,
         tested,
+        profile: Some(request.profile),
+        depth: Some(request.depth),
     }));
 }
 
@@ -408,10 +440,33 @@ pub fn run_blocking(
     result.ok_or_else(|| "the benchmark stopped without a result".to_string())
 }
 
+/// Resolve the environment a run should use. An injected environment always wins; the fallback
+/// is only called when the request asked for detection and supplied nothing.
+fn environment_for(
+    request: &RunRequest,
+    detect: impl FnOnce() -> SystemInfo,
+) -> Option<SystemInfo> {
+    if !request.include_system {
+        return None;
+    }
+    Some(request.environment.clone().unwrap_or_else(detect))
+}
+
+fn detect_environment() -> SystemInfo {
+    #[cfg(target_os = "android")]
+    {
+        SystemInfo::default()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        system::detect()
+    }
+}
+
 /// System information for the interface's "current DNS" display. Kept here so callers do not
 /// have to touch the platform-specific module directly.
 pub fn detect_system() -> SystemInfo {
-    system::detect()
+    detect_environment()
 }
 
 #[cfg(test)]
@@ -428,6 +483,10 @@ mod tests {
             transport: protocol,
             addr: Some(SocketAddr::new(ip.parse().unwrap(), 53)),
             endpoint: ip.to_string(),
+            category: crate::servers::Category::General,
+            description: String::new(),
+            website: String::new(),
+            dot_host: None,
             cached: Some(10.0),
             uncached: Some(20.0),
             cached_min: Some(9.0),
@@ -459,6 +518,8 @@ mod tests {
             steerings: Vec::new(),
             scanned: 2,
             tested: 2,
+            profile: Some(Profile::Balanced),
+            depth: Some(TestDepth::BALANCED),
         };
         assert_eq!(result.best().unwrap().label, "Encrypted");
         assert_eq!(result.best_plain().unwrap().label, "Plain");
@@ -499,5 +560,44 @@ mod tests {
         r.dnssec_bogus = Some(false);
         assert_eq!(r.security_status(), SecurityStatus::BogusAccepted);
         assert!(!r.recommendable());
+    }
+
+    #[test]
+    fn run_request_environment_overrides_detection() {
+        let info = SystemInfo {
+            dns: vec!["9.9.9.9".parse().unwrap()],
+            ..Default::default()
+        };
+        let request = RunRequest {
+            environment: Some(info.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            environment_for(&request, || panic!("detection must not run")),
+            Some(info)
+        );
+    }
+
+    #[test]
+    fn environment_is_none_when_system_detection_is_off() {
+        let request = RunRequest {
+            include_system: false,
+            environment: Some(SystemInfo::default()),
+            ..Default::default()
+        };
+        assert_eq!(
+            environment_for(&request, || panic!("detection must not run")),
+            None
+        );
+    }
+
+    #[test]
+    fn old_run_results_load_without_profile_or_depth() {
+        let old: RunResult = serde_json::from_str(
+            r#"{"protocol":"Udp","family":"Any","duration_secs":1.0,"data_center":null,"current_dns":[],"rows":[],"steerings":[],"scanned":0,"tested":0}"#,
+        )
+        .unwrap();
+        assert_eq!(old.profile, None);
+        assert_eq!(old.depth, None);
     }
 }
