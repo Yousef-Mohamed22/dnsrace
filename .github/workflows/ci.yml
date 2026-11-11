@@ -143,6 +143,8 @@ jobs:
           targets: armv7-linux-androideabi,aarch64-linux-android,x86_64-linux-android
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Install Android platform, build tools, and NDK
         run: |
           sdkmanager --install \

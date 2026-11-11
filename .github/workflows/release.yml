@@ -261,6 +261,10 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The legacy "tools" package was removed from the SDK repository;
+          # installing it makes setup-android fail before our own sdkmanager step.
+          packages: platform-tools
 
       - name: Install Android platform, build tools, and NDK
         run: |
