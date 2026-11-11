@@ -313,12 +313,12 @@ jobs:
       - name: Stage APK
         run: |
           version="${GITHUB_REF_NAME#v}"
+          apk_name="dnsrace-${version}-${ANDROID_APK_SUFFIX}.apk"
           mkdir -p dist
-          apk="dist/dnsrace-${version}-${ANDROID_APK_SUFFIX}.apk"
-          cp target/release/apk/dnsrace.apk "$apk"
-          sha256sum "$apk" | tee "$apk.sha256"
-          aapt2 dump badging "$apk" \
-            | grep -E "^(package|sdkVersion|targetSdkVersion|uses-permission|native-code):"
+          cp target/release/apk/dnsrace.apk "dist/$apk_name"
+          (cd dist && sha256sum "$apk_name" | tee "$apk_name.sha256")
+          aapt2 dump badging "dist/$apk_name" \
+            | grep -E "^(package|minSdkVersion|targetSdkVersion|uses-permission|native-code):"
 
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
