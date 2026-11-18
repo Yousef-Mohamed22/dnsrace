@@ -33,7 +33,7 @@ selects the compiled-against `platforms/android-36/android.jar`; cargo-apk
 0.10 has no separate `compile_sdk` key.
 
 ```sh
-./packaging/build-icons.sh
+cargo run -p xtask -- icons
 cargo apk build --lib
 mkdir -p dist
 cp target/debug/apk/dnsrace.apk dist/dnsrace-0.8.0-android-debug.apk
@@ -103,7 +103,7 @@ On HyperOS, enable **Install via USB** first. Use plain `adb install -r`;
 - `drawable/ic_launcher_monochrome.xml` for Android 13 themed icons.
 
 Everything is regenerated from the two SVG sources by
-`./packaging/build-icons.sh`; do not edit the PNGs by hand.
+`cargo run -p xtask -- icons`; do not edit the PNGs by hand.
 
 ## Android behaviour
 

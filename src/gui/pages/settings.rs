@@ -4,14 +4,15 @@
 //! Every control reads `AppState` and emits a `UiAction`; nothing here writes a file or talks to
 //! the platform.
 
-use eframe::egui::{self, Align, Layout, RichText, Sense, Vec2};
+use eframe::egui::{self, Align, Sense, Vec2};
 
 use crate::config::Theme;
 use crate::gui::actions::{AboutLink, UiAction};
 use crate::gui::components::{self, ButtonKind};
 use crate::gui::icons;
-use crate::gui::state::{AppState, LayoutMode, ViewContext};
+use crate::gui::state::{AppState, LayoutMode, UpdatePhase, ViewContext};
 use crate::gui::theme::{self, Tokens};
+use crate::i18n::{self, Language, t};
 use crate::profile::Profile;
 use crate::servers::{Family, Protocol};
 
@@ -44,11 +45,13 @@ pub fn render_settings(
     ui.add_space(CARD_GAP);
     appearance_card(state, ui, actions, tokens, touch);
     ui.add_space(CARD_GAP);
+    updates_card(state, ui, actions, cx, tokens, touch);
+    ui.add_space(CARD_GAP);
     benchmark_card(state, ui, actions, tokens, touch);
     ui.add_space(CARD_GAP);
     network_card(state, ui, actions, tokens, touch);
     ui.add_space(CARD_GAP);
-    data_card(state, ui, actions, tokens, touch);
+    data_card(state, cx, ui, actions, tokens, touch);
 }
 
 /// The About card. It lives inside Settings instead of opening a floating window.
@@ -62,20 +65,20 @@ pub fn render_about(
     let touch = cx.layout == LayoutMode::Mobile;
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
+        i18n::horizontal(ui, |ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
             if ui.is_rect_visible(rect) {
                 icons::paint_logo(ui.painter(), rect);
             }
-            ui.vertical(|ui| {
-                ui.label(RichText::new("dnsrace").size(20.0).strong());
+            i18n::vertical(ui, |ui| {
+                ui.label(crate::i18n::rich("dnsrace").size(20.0).strong());
                 ui.label(
-                    RichText::new(format!("Version {}", cx.version))
+                    crate::i18n::rich(i18n::fill("Version {}", &[&cx.version]))
                         .size(13.0)
                         .color(tokens.muted),
                 );
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
                 if components::button(ui, "Close about", ButtonKind::Ghost, touch, true).clicked() {
                     actions.push(UiAction::CloseAbout);
                 }
@@ -84,14 +87,16 @@ pub fn render_about(
         ui.add_space(6.0);
         ui.separator();
         ui.add_space(4.0);
-        ui.label(RichText::new("Find the fastest DNS resolver for your connection.").size(13.0));
         ui.label(
-            RichText::new("MIT licence · 100% Rust · No account, no telemetry.")
+            crate::i18n::rich("Find the fastest DNS resolver for your connection.").size(13.0),
+        );
+        ui.label(
+            crate::i18n::rich("MIT licence · 100% Rust · No account, no telemetry.")
                 .size(12.0)
                 .color(tokens.muted),
         );
         ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             for (label, link) in [
                 ("Project website", AboutLink::Project),
                 ("Report an issue", AboutLink::Issues),
@@ -115,17 +120,17 @@ fn actions_card(
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
         if touch {
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Settings actions").size(16.0).strong());
+            i18n::vertical(ui, |ui| {
+                ui.label(crate::i18n::rich("Settings actions").size(16.0).strong());
                 ui.label(
-                    RichText::new(
+                    crate::i18n::rich(
                         "Saving writes these settings to this device. Reset restores the defaults.",
                     )
                     .size(12.5)
                     .color(tokens.muted),
                 );
                 ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
+                i18n::horizontal_wrapped(ui, |ui| {
                     if components::button(
                         ui,
                         "Save settings",
@@ -152,18 +157,18 @@ fn actions_card(
             });
             return;
         }
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Settings actions").size(16.0).strong());
+        i18n::horizontal(ui, |ui| {
+            i18n::vertical(ui, |ui| {
+                ui.label(crate::i18n::rich("Settings actions").size(16.0).strong());
                 ui.label(
-                    RichText::new(
+                    crate::i18n::rich(
                         "Saving writes these settings to this device. Reset restores the defaults.",
                     )
                     .size(12.5)
                     .color(tokens.muted),
                 );
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
                 if components::button(
                     ui,
                     "Save settings",
@@ -200,9 +205,9 @@ fn appearance_card(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new("Appearance").size(16.0).strong());
+        ui.label(crate::i18n::rich("Appearance").size(16.0).strong());
         ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             for theme in Theme::ALL {
                 if components::chip(ui, theme.label(), state.settings.theme == theme, touch)
                     .clicked()
@@ -212,10 +217,180 @@ fn appearance_card(
             }
         });
         ui.label(
-            RichText::new(state.settings.theme.description())
+            crate::i18n::rich(state.settings.theme.description())
                 .size(12.0)
                 .color(tokens.muted),
         );
+
+        ui.add_space(8.0);
+        ui.label(crate::i18n::rich("Language").size(11.0).color(tokens.muted));
+        i18n::horizontal_wrapped(ui, |ui| {
+            for language in Language::ALL {
+                if components::chip(
+                    ui,
+                    language.label(),
+                    state.settings.language == language,
+                    touch,
+                )
+                .clicked()
+                {
+                    actions.push(UiAction::SetLanguage(language));
+                }
+            }
+        });
+        ui.label(
+            crate::i18n::rich(state.settings.language.description())
+                .size(12.0)
+                .color(tokens.muted),
+        );
+    });
+}
+
+fn updates_card(
+    state: &AppState,
+    ui: &mut egui::Ui,
+    actions: &mut Vec<UiAction>,
+    cx: &ViewContext,
+    tokens: Tokens,
+    touch: bool,
+) {
+    components::card(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(crate::i18n::rich("Updates").size(16.0).strong());
+        ui.add_space(6.0);
+        ui.label(
+            crate::i18n::rich(i18n::fill("Current version {}", &[&cx.version]))
+                .size(12.5)
+                .color(tokens.muted),
+        );
+        let mut check_updates = state.settings.check_updates;
+        if ui
+            .checkbox(&mut check_updates, t("Check automatically on startup"))
+            .changed()
+        {
+            actions.push(UiAction::SetCheckUpdates(check_updates));
+        }
+        ui.add_space(8.0);
+        match state.update.phase {
+            UpdatePhase::Idle | UpdatePhase::UpToDate | UpdatePhase::Failed => {
+                i18n::horizontal_wrapped(ui, |ui| {
+                    if components::button(
+                        ui,
+                        "Check for updates",
+                        ButtonKind::Secondary,
+                        touch,
+                        true,
+                    )
+                    .clicked()
+                    {
+                        actions.push(UiAction::CheckUpdates);
+                    }
+                });
+                if state.update.phase == UpdatePhase::UpToDate {
+                    ui.label(
+                        crate::i18n::rich("You are up to date.")
+                            .size(12.5)
+                            .color(tokens.success),
+                    );
+                }
+                if let Some(error) = state.update.error.as_deref() {
+                    ui.label(crate::i18n::rich(error).size(12.0).color(tokens.muted));
+                }
+            }
+            UpdatePhase::Checking => {
+                i18n::horizontal(ui, |ui| {
+                    ui.spinner();
+                    ui.label(crate::i18n::rich("Checking for updates…").size(12.5));
+                });
+            }
+            UpdatePhase::Available => {
+                if let Some(release) = state.update.release.as_ref() {
+                    ui.label(
+                        crate::i18n::rich(format!("{} {}", t("Update available"), release.version))
+                            .size(13.5)
+                            .strong(),
+                    );
+                    if !release.notes.trim().is_empty() {
+                        ui.label(
+                            crate::i18n::rich("What's new")
+                                .size(11.0)
+                                .color(tokens.muted),
+                        );
+                        ui.label(
+                            crate::i18n::rich(release.notes.trim())
+                                .size(12.0)
+                                .color(tokens.muted),
+                        );
+                    }
+                    ui.add_space(6.0);
+                    i18n::horizontal_wrapped(ui, |ui| {
+                        let label = if crate::update::install_kind()
+                            == crate::update::InstallKind::Android
+                        {
+                            "Download update"
+                        } else {
+                            "Download and install"
+                        };
+                        if components::button(ui, label, ButtonKind::Primary, touch, true).clicked()
+                        {
+                            actions.push(UiAction::InstallUpdate);
+                        }
+                        if components::button(
+                            ui,
+                            "Open the download page",
+                            ButtonKind::Ghost,
+                            touch,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            actions.push(UiAction::OpenAboutLink(AboutLink::Releases));
+                        }
+                    });
+                }
+            }
+            UpdatePhase::Downloading => {
+                let (received, total) = state.update.progress.unwrap_or((0, None));
+                let text = match total {
+                    Some(total) if total > 0 => format!(
+                        "{} {:.0}%",
+                        t("Downloading update…"),
+                        received as f64 / total as f64 * 100.0
+                    ),
+                    _ => t("Downloading update…").to_owned(),
+                };
+                ui.label(crate::i18n::rich(text).size(12.5));
+                ui.add(
+                    egui::ProgressBar::new(match total {
+                        Some(total) if total > 0 => received as f32 / total as f32,
+                        _ => 0.0,
+                    })
+                    .animate(true),
+                );
+            }
+            UpdatePhase::Verifying => {
+                ui.label(crate::i18n::rich("Verifying update…").size(12.5));
+            }
+            UpdatePhase::Installing => {
+                ui.label(crate::i18n::rich("Installing update…").size(12.5));
+            }
+            UpdatePhase::Restarting => {
+                ui.label(
+                    crate::i18n::rich("Update ready. dnsrace will restart.")
+                        .size(12.5)
+                        .color(tokens.success),
+                );
+            }
+        }
+        if crate::update::install_kind() == crate::update::InstallKind::Android {
+            ui.label(
+                crate::i18n::rich(
+                    "This update cannot install itself on Android. Download the APK and open it to update.",
+                )
+                .size(11.5)
+                .color(tokens.muted),
+            );
+        }
     });
 }
 
@@ -228,7 +403,7 @@ fn benchmark_card(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new("Benchmark defaults").size(16.0).strong());
+        ui.label(crate::i18n::rich("Benchmark defaults").size(16.0).strong());
         ui.add_space(6.0);
 
         let mut profile = state.settings.profile;
@@ -237,7 +412,7 @@ fn benchmark_card(
             actions.push(UiAction::SetProfile(profile));
         }
         ui.label(
-            RichText::new(profile.description())
+            crate::i18n::rich(profile.description())
                 .size(12.0)
                 .color(tokens.muted),
         );
@@ -263,7 +438,7 @@ fn benchmark_card(
                 .num_columns(2)
                 .spacing([12.0, 10.0])
                 .show(ui, |ui| {
-                    ui.vertical(|ui| {
+                    i18n::vertical(ui, |ui| {
                         ui.set_width(width);
                         field!(
                             ui,
@@ -275,7 +450,7 @@ fn benchmark_card(
                             UiAction::SetTimeout
                         );
                     });
-                    ui.vertical(|ui| {
+                    i18n::vertical(ui, |ui| {
                         ui.set_width(width);
                         field!(
                             ui,
@@ -288,7 +463,7 @@ fn benchmark_card(
                         );
                     });
                     ui.end_row();
-                    ui.vertical(|ui| {
+                    i18n::vertical(ui, |ui| {
                         ui.set_width(width);
                         field!(
                             ui,
@@ -300,7 +475,7 @@ fn benchmark_card(
                             UiAction::SetRepeat
                         );
                     });
-                    ui.vertical(|ui| {
+                    i18n::vertical(ui, |ui| {
                         ui.set_width(width);
                         field!(
                             ui,
@@ -313,7 +488,7 @@ fn benchmark_card(
                         );
                     });
                     ui.end_row();
-                    ui.vertical(|ui| {
+                    i18n::vertical(ui, |ui| {
                         ui.set_width(width);
                         field!(
                             ui,
@@ -325,14 +500,14 @@ fn benchmark_card(
                             UiAction::SetRandomLookups
                         );
                     });
-                    ui.vertical(|ui| {
+                    i18n::vertical(ui, |ui| {
                         ui.set_width(width);
                     });
                     ui.end_row();
                 });
         } else {
-            ui.horizontal_wrapped(|ui| {
-                ui.vertical(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
+                i18n::vertical(ui, |ui| {
                     ui.set_min_width(96.0);
                     field!(
                         ui,
@@ -344,7 +519,7 @@ fn benchmark_card(
                         UiAction::SetTimeout
                     );
                 });
-                ui.vertical(|ui| {
+                i18n::vertical(ui, |ui| {
                     ui.set_min_width(96.0);
                     field!(
                         ui,
@@ -356,7 +531,7 @@ fn benchmark_card(
                         UiAction::SetJobs
                     );
                 });
-                ui.vertical(|ui| {
+                i18n::vertical(ui, |ui| {
                     ui.set_min_width(96.0);
                     field!(
                         ui,
@@ -368,7 +543,7 @@ fn benchmark_card(
                         UiAction::SetRepeat
                     );
                 });
-                ui.vertical(|ui| {
+                i18n::vertical(ui, |ui| {
                     ui.set_min_width(96.0);
                     field!(
                         ui,
@@ -380,7 +555,7 @@ fn benchmark_card(
                         UiAction::SetCachedRounds
                     );
                 });
-                ui.vertical(|ui| {
+                i18n::vertical(ui, |ui| {
                     ui.set_min_width(96.0);
                     field!(
                         ui,
@@ -396,7 +571,7 @@ fn benchmark_card(
         }
         ui.add_space(4.0);
         ui.label(
-            RichText::new("Editing any value switches the profile to Custom.")
+            crate::i18n::rich("Editing any value switches the profile to Custom.")
                 .size(11.5)
                 .color(tokens.muted),
         );
@@ -421,7 +596,11 @@ fn number_field<T: egui::emath::Numeric>(
     suffix: &str,
     style: FieldStyle,
 ) -> Option<T> {
-    let label = ui.label(RichText::new(label).size(11.0).color(style.tokens.muted));
+    let label = ui.label(
+        crate::i18n::rich(label)
+            .size(11.0)
+            .color(style.tokens.muted),
+    );
     let mut value = value;
     let field = egui::DragValue::new(&mut value)
         .range(range)
@@ -444,11 +623,15 @@ fn network_card(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new("Network and steering").size(16.0).strong());
+        ui.label(
+            crate::i18n::rich("Network and steering")
+                .size(16.0)
+                .strong(),
+        );
         ui.add_space(6.0);
 
-        ui.label(RichText::new("Protocol").size(11.0).color(tokens.muted));
-        ui.horizontal_wrapped(|ui| {
+        ui.label(crate::i18n::rich("Protocol").size(11.0).color(tokens.muted));
+        i18n::horizontal_wrapped(ui, |ui| {
             for protocol in Protocol::all() {
                 if components::chip(
                     ui,
@@ -465,11 +648,11 @@ fn network_card(
 
         ui.add_space(4.0);
         ui.label(
-            RichText::new("Address family")
+            crate::i18n::rich("Address family")
                 .size(11.0)
                 .color(tokens.muted),
         );
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             for family in [Family::Any, Family::V4, Family::V6] {
                 if components::chip(ui, family.label(), state.settings.family == family, touch)
                     .clicked()
@@ -482,14 +665,17 @@ fn network_card(
         ui.add_space(6.0);
         let mut include_system = state.settings.include_system;
         if ui
-            .checkbox(&mut include_system, "Include servers found on this machine")
+            .checkbox(
+                &mut include_system,
+                t("Include servers found on this machine"),
+            )
             .changed()
         {
             actions.push(UiAction::SetIncludeSystem(include_system));
         }
         let mut include_nearby = state.settings.include_nearby;
         if ui
-            .checkbox(&mut include_nearby, "Include nearby open resolvers")
+            .checkbox(&mut include_nearby, t("Include nearby open resolvers"))
             .changed()
         {
             actions.push(UiAction::SetIncludeNearby(include_nearby));
@@ -497,14 +683,14 @@ fn network_card(
 
         ui.add_space(8.0);
         ui.label(
-            RichText::new("Steering hostnames")
+            crate::i18n::rich("Steering hostnames")
                 .size(11.0)
                 .color(tokens.muted),
         );
         let mut hostnames = state.settings.hostnames.clone();
         let response = ui.add(
             egui::TextEdit::multiline(&mut hostnames)
-                .hint_text("One hostname per line")
+                .hint_text(t("One hostname per line"))
                 .desired_rows(3)
                 .margin(Vec2::new(10.0, 8.0)),
         );
@@ -516,6 +702,7 @@ fn network_card(
 
 fn data_card(
     state: &AppState,
+    cx: &ViewContext,
     ui: &mut egui::Ui,
     actions: &mut Vec<UiAction>,
     tokens: Tokens,
@@ -523,16 +710,19 @@ fn data_card(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new("Data").size(16.0).strong());
+        ui.label(crate::i18n::rich("Data").size(16.0).strong());
         ui.add_space(6.0);
 
         ui.label(
-            RichText::new(format!("{} saved benchmark run(s)", state.history.len()))
-                .size(12.5)
-                .color(tokens.muted),
+            crate::i18n::rich(i18n::fill(
+                "{} saved benchmark run(s)",
+                &[&state.history.len()],
+            ))
+            .size(12.5)
+            .color(tokens.muted),
         );
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             if components::button(
                 ui,
                 "Clear history",
@@ -552,10 +742,10 @@ fn data_card(
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
-        ui.label(RichText::new("Custom resolvers").size(13.0).strong());
+        ui.label(crate::i18n::rich("Custom resolvers").size(13.0).strong());
         if state.settings.custom.is_empty() {
             ui.label(
-                RichText::new("No custom resolvers yet.")
+                crate::i18n::rich("No custom resolvers yet.")
                     .size(12.0)
                     .color(tokens.muted),
             );
@@ -563,11 +753,11 @@ fn data_card(
             for (index, resolver) in state.settings.custom.iter().enumerate() {
                 // Wrap on narrow phone rows: two long action labels used to overflow the
                 // right-to-left group and paint over the resolver name.
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(&resolver.name).size(12.5));
+                i18n::horizontal_wrapped(ui, |ui| {
+                    ui.label(crate::i18n::rich(&resolver.name).size(12.5));
                     if components::button(
                         ui,
-                        &format!("Edit {}", resolver.name),
+                        &i18n::fill("Edit {}", &[&resolver.name]),
                         ButtonKind::Ghost,
                         touch,
                         true,
@@ -578,7 +768,7 @@ fn data_card(
                     }
                     if components::button(
                         ui,
-                        &format!("Remove {}", resolver.name),
+                        &i18n::fill("Remove {}", &[&resolver.name]),
                         ButtonKind::Ghost,
                         touch,
                         true,
@@ -602,5 +792,60 @@ fn data_card(
         {
             actions.push(UiAction::OpenCustom);
         }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(crate::i18n::rich("Diagnostics").size(13.0).strong());
+        i18n::horizontal_wrapped(ui, |ui| {
+            if components::button(ui, "Copy diagnostics", ButtonKind::Secondary, touch, true)
+                .clicked()
+            {
+                actions.push(UiAction::CopyDiagnostics);
+            }
+        });
+
+        if !cx.capabilities.can_export_files {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.label(
+            crate::i18n::rich("Import resolvers and favourites")
+                .size(13.0)
+                .strong(),
+        );
+        ui.label(
+            crate::i18n::rich("Leave the file blank to use the default export location.")
+                .size(11.5)
+                .color(tokens.muted),
+        );
+        let mut path = state.import_path.clone();
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut path)
+                .hint_text(t("Path to a JSON file"))
+                .desired_width(f32::INFINITY)
+                .margin(Vec2::new(10.0, 8.0)),
+        );
+        if response.changed() {
+            actions.push(UiAction::SetImportPath(path));
+        }
+        i18n::horizontal_wrapped(ui, |ui| {
+            if components::button(ui, "Import", ButtonKind::Secondary, touch, true).clicked() {
+                actions.push(UiAction::ImportResolverData);
+            }
+            if components::button(
+                ui,
+                "Export resolvers and favourites",
+                ButtonKind::Secondary,
+                touch,
+                true,
+            )
+            .clicked()
+            {
+                actions.push(UiAction::ExportResolverData);
+            }
+        });
     });
 }

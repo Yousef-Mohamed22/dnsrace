@@ -16,11 +16,13 @@ use crate::config::{self, CustomResolver, HistoryEntry, Settings, Theme};
 use crate::engine::{self, RunEvent, RunRequest, RunResult, Stage};
 use crate::gui::modals;
 use crate::gui::theme;
+use crate::i18n;
 use crate::platform::AppliedDns;
 use crate::profile::Profile;
 use crate::providers;
 use crate::servers::{Candidate, Family, Kind, Pool, Protocol};
 use crate::system::SystemInfo;
+use crate::update::{self, UpdateEvent};
 
 use super::actions::{Page, RunScope, UiAction};
 use super::backend::Backend;
@@ -40,6 +42,7 @@ pub struct App {
     run_rx: Option<mpsc::Receiver<RunEvent>>,
     apply_rx: Option<mpsc::Receiver<Result<AppliedDns, String>>>,
     revert_rx: Option<mpsc::Receiver<Result<(), String>>>,
+    update_rx: Option<mpsc::Receiver<UpdateEvent>>,
     run_started: Option<Instant>,
     /// Viewport size the current Android safe area was measured at. Rotation changes the size,
     /// so the shell re-queries the activity instead of assuming portrait insets.
@@ -68,6 +71,7 @@ impl App {
             run_rx: None,
             apply_rx: None,
             revert_rx: None,
+            update_rx: None,
             run_started: None,
             safe_area_for: None,
         }
@@ -78,6 +82,13 @@ impl App {
     pub fn start_initial_tasks(&mut self) {
         self.rebuild_catalog();
         self.start_detection(false);
+    }
+
+    /// Start the automatic update check in production. Tests never call this.
+    pub fn start_update_check_if_enabled(&mut self) {
+        if self.state.settings.check_updates {
+            self.start_update_check();
+        }
     }
 
     pub fn dispatch(&mut self, action: UiAction) {
@@ -99,6 +110,12 @@ impl App {
             }
             UiAction::SetProfile(profile) => self.state.settings.apply_profile(profile),
             UiAction::SetTheme(theme) => self.state.settings.theme = theme,
+            UiAction::SetLanguage(language) => {
+                self.state.settings.language = language;
+                i18n::set_language(language);
+            }
+            UiAction::SetCheckUpdates(check) => self.state.settings.check_updates = check,
+            UiAction::SetImportPath(path) => self.state.import_path = path,
             UiAction::SetSearch(query) => self.state.search = query,
             UiAction::SetCategoryFilter(category) => self.state.category_filter = category,
             UiAction::SetKindFilter(kind) => self.state.kind_filter = kind,
@@ -337,6 +354,11 @@ impl App {
             | UiAction::ExportHistory(_, _)
             | UiAction::ShareReport(_)
             | UiAction::ShareHistory(_, _)
+            | UiAction::CheckUpdates
+            | UiAction::InstallUpdate
+            | UiAction::CopyDiagnostics
+            | UiAction::ExportResolverData
+            | UiAction::ImportResolverData
             | UiAction::SaveCustom => self.effects.push(action),
         }
     }
@@ -356,6 +378,11 @@ impl App {
                 UiAction::ConfirmApply => self.confirm_apply(),
                 UiAction::ConfirmRevert => self.confirm_revert(),
                 UiAction::SaveCustom => self.save_custom(),
+                UiAction::CheckUpdates => self.start_update_check(),
+                UiAction::InstallUpdate => self.start_update_install(),
+                UiAction::CopyDiagnostics => self.copy_diagnostics(),
+                UiAction::ExportResolverData => self.export_resolvers(),
+                UiAction::ImportResolverData => self.import_resolvers(),
                 _ => unreachable!("only backend actions are queued as effects"),
             }
         }
@@ -367,12 +394,14 @@ impl App {
         self.poll_detection(None);
         self.poll_run(None);
         self.poll_apply(None);
+        self.poll_update(None);
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
         self.poll_detection(Some(ctx));
         self.poll_run(Some(ctx));
         self.poll_apply(Some(ctx));
+        self.poll_update(Some(ctx));
     }
 
     fn start_detection(&mut self, notify: bool) {
@@ -420,11 +449,7 @@ impl App {
             let message = if count == 0 {
                 "Refreshed: no system DNS servers were detected.".to_string()
             } else {
-                format!(
-                    "Refreshed: {} DNS server{} detected.",
-                    count,
-                    if count == 1 { "" } else { "s" }
-                )
+                crate::i18n::fill("Refreshed: {} DNS server(s) detected.", &[&count])
             };
             self.state.notify(message, false);
         }
@@ -550,7 +575,10 @@ impl App {
         }
 
         let message = match result.best() {
-            Some(row) => format!("Finished: {} is fastest at {:.1} ms.", row.label, row.score),
+            Some(row) => {
+                let score = format!("{:.1}", row.score);
+                crate::i18n::fill("Finished: {} is fastest at {} ms.", &[&row.label, &score])
+            }
             None => "Finished, but no resolver completed enough measurements.".to_string(),
         };
         self.state.notify(message, false);
@@ -730,7 +758,7 @@ impl App {
                     let mut system = self.state.system.clone().unwrap_or_default();
                     system.dns = applied.applied.clone();
                     system.interface = Some(applied.interface.clone());
-                    system.source = Some(format!("Applied via {}", applied.method));
+                    system.source = Some(crate::i18n::fill("Applied via {}", &[&applied.method]));
                     self.state.system = Some(system);
                     self.state.applied = Some(applied);
                     if self.state.settings.include_system && self.state.settings.protocol.is_plain()
@@ -789,6 +817,262 @@ impl App {
             && let Some(ctx) = ctx
         {
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    fn start_update_check(&mut self) {
+        if self.update_rx.is_some()
+            || matches!(
+                self.state.update.phase,
+                super::state::UpdatePhase::Downloading
+                    | super::state::UpdatePhase::Verifying
+                    | super::state::UpdatePhase::Installing
+            )
+        {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.update_rx = Some(receiver);
+        self.state.update.phase = super::state::UpdatePhase::Checking;
+        self.state.update.error = None;
+        update::spawn_check(self.cx.version.to_owned(), sender);
+    }
+
+    fn start_update_install(&mut self) {
+        let Some(release) = self.state.update.release.clone() else {
+            self.state.notify("Check for updates first.", true);
+            return;
+        };
+        if self.update_rx.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.update_rx = Some(receiver);
+        self.state.update.phase = super::state::UpdatePhase::Downloading;
+        self.state.update.progress = Some((0, None));
+        self.state.update.error = None;
+        update::spawn_install(release, sender);
+    }
+
+    fn poll_update(&mut self, ctx: Option<&egui::Context>) {
+        let Some(rx) = self.update_rx.take() else {
+            return;
+        };
+        let mut keep = true;
+        loop {
+            match rx.try_recv() {
+                Ok(UpdateEvent::Checking) => {
+                    self.state.update.phase = super::state::UpdatePhase::Checking;
+                }
+                Ok(UpdateEvent::UpToDate) => {
+                    self.state.update.phase = super::state::UpdatePhase::UpToDate;
+                    self.state.update.release = None;
+                    self.state.update.progress = None;
+                    keep = false;
+                }
+                Ok(UpdateEvent::Available(release)) => {
+                    self.state.update.phase = super::state::UpdatePhase::Available;
+                    self.state.update.release = Some(release);
+                    self.state.update.progress = None;
+                    keep = false;
+                }
+                Ok(UpdateEvent::Downloading { received, total }) => {
+                    self.state.update.phase = super::state::UpdatePhase::Downloading;
+                    self.state.update.progress = Some((received, total));
+                }
+                Ok(UpdateEvent::Verifying) => {
+                    self.state.update.phase = super::state::UpdatePhase::Verifying;
+                }
+                Ok(UpdateEvent::Installing) => {
+                    self.state.update.phase = super::state::UpdatePhase::Installing;
+                }
+                Ok(UpdateEvent::Restarting) => {
+                    self.state.update.phase = super::state::UpdatePhase::Restarting;
+                    keep = false;
+                }
+                Ok(UpdateEvent::OpenPage(url)) => {
+                    self.state.update.phase = super::state::UpdatePhase::Idle;
+                    self.open_link(url);
+                    keep = false;
+                }
+                Ok(UpdateEvent::Failed(error)) => {
+                    self.state.update.phase = super::state::UpdatePhase::Failed;
+                    self.state.update.error = Some(error.clone());
+                    keep = false;
+                    let message = if self.state.update.release.is_some()
+                        && self.state.update.progress.is_some()
+                    {
+                        format!("Could not update: {error}")
+                    } else {
+                        format!("Could not check for updates: {error}")
+                    };
+                    self.state.notify(message, true);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    keep = false;
+                    if self.state.update.phase == super::state::UpdatePhase::Checking {
+                        self.state.update.phase = super::state::UpdatePhase::Failed;
+                        self.state.notify("Could not check for updates.", true);
+                    }
+                    break;
+                }
+            }
+        }
+        if keep {
+            self.update_rx = Some(rx);
+        }
+        if self.state.update.phase == super::state::UpdatePhase::Restarting
+            && let Some(ctx) = ctx
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if let Some(ctx) = ctx
+            && matches!(
+                self.state.update.phase,
+                super::state::UpdatePhase::Checking
+                    | super::state::UpdatePhase::Downloading
+                    | super::state::UpdatePhase::Verifying
+                    | super::state::UpdatePhase::Installing
+            )
+        {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
+    }
+
+    fn copy_diagnostics(&mut self) {
+        let settings = &self.state.settings;
+        let update = match self.state.update.phase {
+            super::state::UpdatePhase::Idle => i18n::t("not checked").to_owned(),
+            super::state::UpdatePhase::Checking => i18n::t("checking").to_owned(),
+            super::state::UpdatePhase::UpToDate => i18n::t("up to date").to_owned(),
+            super::state::UpdatePhase::Available => self
+                .state
+                .update
+                .release
+                .as_ref()
+                .map(|release| i18n::fill("version {} available", &[&release.version]))
+                .unwrap_or_default(),
+            super::state::UpdatePhase::Downloading => i18n::t("downloading").to_owned(),
+            super::state::UpdatePhase::Verifying => i18n::t("verifying").to_owned(),
+            super::state::UpdatePhase::Installing => i18n::t("installing").to_owned(),
+            super::state::UpdatePhase::Restarting => i18n::t("restarting").to_owned(),
+            super::state::UpdatePhase::Failed => i18n::t("failed").to_owned(),
+        };
+        let last_run = self
+            .state
+            .result
+            .as_ref()
+            .and_then(|result| result.best())
+            .map(|row| format!("{} · {:.1} ms", row.label, row.score));
+        let system = self.state.system.as_ref();
+        let config_dir = config::config_dir();
+        let report = crate::diagnostics::Report {
+            version: self.cx.version,
+            language: settings.language.label(),
+            theme: settings.theme.label(),
+            profile: settings.profile.label(),
+            protocol: settings.protocol.label(),
+            family: settings.family.label(),
+            timeout_ms: settings.timeout_ms,
+            jobs: settings.jobs,
+            repeat: settings.repeat,
+            cached_rounds: settings.cached_rounds,
+            random_lookups: settings.random_lookups,
+            current_dns: system
+                .map(|system| system.dns.as_slice())
+                .unwrap_or_default(),
+            interface: system.and_then(|system| system.interface.as_deref()),
+            gateway: system.and_then(|system| system.gateway),
+            data_center: self
+                .state
+                .result
+                .as_ref()
+                .and_then(|result| result.data_center.as_deref()),
+            last_run: last_run.as_deref(),
+            update: &update,
+            config_dir: &config_dir,
+            history: self.state.history.len(),
+            custom: settings.custom.len(),
+            favourites: settings.favorites.len(),
+        };
+        match self.backend.copy(&report.render()) {
+            Ok(()) => self
+                .state
+                .notify("Diagnostics copied to the clipboard.", false),
+            Err(error) => self.state.notify(format!("Could not copy: {error}"), true),
+        }
+    }
+
+    fn export_resolvers(&mut self) {
+        if !self.cx.capabilities.can_export_files {
+            self.state.notify(
+                "Exporting files is not available on Android. Share the report instead.",
+                true,
+            );
+            return;
+        }
+        let text = match crate::transfer::export(&self.state.settings) {
+            Ok(text) => text,
+            Err(error) => {
+                self.state
+                    .notify(format!("Could not export: {error}"), true);
+                return;
+            }
+        };
+        let path = config::resolver_export_path(&self.state.settings);
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            self.state
+                .notify(format!("Could not export: {error}"), true);
+            return;
+        }
+        match std::fs::write(&path, text) {
+            Ok(()) => self
+                .state
+                .notify("Exported resolvers and favourites.", false),
+            Err(error) => self
+                .state
+                .notify(format!("Could not export: {error}"), true),
+        }
+    }
+
+    fn import_resolvers(&mut self) {
+        let path = if self.state.import_path.trim().is_empty() {
+            config::resolver_export_path(&self.state.settings)
+        } else {
+            std::path::PathBuf::from(self.state.import_path.trim())
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.state
+                    .notify(format!("Could not import that file: {error}"), true);
+                return;
+            }
+        };
+        let mut settings = self.state.settings.clone();
+        match crate::transfer::import(&text, &mut settings) {
+            Ok(summary) => {
+                self.state.settings = settings;
+                self.rebuild_catalog();
+                let message = i18n::fill(
+                    "Imported {} resolvers and {} favourites.",
+                    &[&summary.added_resolvers, &summary.added_favourites],
+                );
+                self.state.notify(message, false);
+                if let Err(error) = self.backend.save_settings(&self.state.settings) {
+                    self.state.notify(error, true);
+                }
+            }
+            Err(error) if error == "not a dnsrace resolver export" => {
+                self.state
+                    .notify("That file is not a dnsrace resolver export.", true);
+            }
+            Err(error) => {
+                self.state
+                    .notify(format!("Could not import that file: {error}"), true);
+            }
         }
     }
 

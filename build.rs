@@ -13,8 +13,9 @@ fn main() {
             "FileDescription",
             "Find the fastest DNS resolver for your connection",
         );
-        resource.set("ProductVersion", "0.8.0");
-        resource.set("FileVersion", "0.8.0");
+        let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+        resource.set("ProductVersion", &version);
+        resource.set("FileVersion", &version);
         if let Err(error) = resource.compile() {
             // A missing resource compiler must not make the Windows build unusable.
             println!("cargo:warning=could not embed Windows resources: {error}");

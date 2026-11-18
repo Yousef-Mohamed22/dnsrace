@@ -1,5 +1,7 @@
 # dnsrace
 
+[English](README.md) · [العربية](README_AR.md)
+
 <img width="1366" height="768" alt="dnsrace showdown" src="https://github.com/user-attachments/assets/c5732c9f-0beb-4d06-b08b-f6bbf7a801e6" />
 
 > Find the fastest DNS resolver for **your** connection, then apply it in one click.
@@ -9,21 +11,29 @@ list from the internet cannot tell you which one is fastest for you. dnsrace mea
 resolvers from your own machine, ranks them by real lookup latency, checks their DNS security
 behaviour, and can switch your system to the winner.
 
-**dnsrace 0.8.0 runs on desktop and Android 8.0+.** The desktop app can apply and revert DNS.
+**dnsrace 0.9.0 runs on desktop and Android 8.0+.** The desktop app can apply and revert DNS.
 Android is a benchmark and guided-setup platform: dnsrace measures resolvers and then helps you
 enter the winner in Private DNS (Android 9+) or per-network Wi-Fi DNS (Android 8.0–8.1). There
-is no iOS or other Apple phone target, no terminal or CLI mode, and no VPN or background
-service.
+is no iOS or other Apple phone target and no VPN or background service. A headless CLI is
+available for scripts and servers.
 
 ## Features
 
+- **Arabic interface with full right-to-left layout.** Every screen, dialog and Android guide is
+  translated. Choose Arabic, English or the device language in Settings; the layout mirrors the
+  navigation rail, bottom bar, cards and table alignment. Noto Sans Arabic is bundled, so no
+  system font is required.
+- **Built-in updates.** dnsrace checks the latest GitHub release at startup (optional) and from
+  Settings. Linux, Windows and macOS downloads are verified against the release
+  `SHA256SUMS.txt` and installed in place before the app restarts. Android opens the APK
+  download link and leaves installation to the system.
 - **One adaptive interface for desktop and phone.** The desktop uses a navigation rail, a dense
   server table and a detail pane. Android uses an app bar, bottom navigation, 48 dp touch
   controls, server cards and bottom sheets. The phone layout reflows automatically and fits
   360 dp and 320 dp screens without horizontal scrolling.
 - **Android 8.0 and newer.** Minimum API 26, target API 36, with `arm64-v8a`,
   `armeabi-v7a` and `x86_64` native libraries in one APK. The app is 100% Rust; there is no
-  Java or Kotlin application code.
+  Java, Kotlin or shell source code.
 - **Guided Private DNS setup.** Android 9+ gets a measured DoT hostname (or a clearly labelled
   provider hostname when only metadata is available) and a shortcut to the Private DNS screen.
   Android 8.0–8.1 gets per-network Wi-Fi DNS steps instead.
@@ -57,43 +67,50 @@ service.
 - **Eight themes:** System, Dark, Light, Midnight, Nord, Solarized Light, Dracula and High
   contrast. **System** follows the operating system's light/dark preference.
 - **Custom resolvers, steering checks and persistent settings.**
+- **Resolver backup and transfer.** Export custom resolvers and favourites as JSON, then import
+  and merge them on another machine. Duplicates are skipped and invalid entries are reported.
+- **Diagnostics report.** Copy version, OS, language, theme, profile, current DNS, last run,
+  update state and config paths in one text block for support requests.
+- **Headless CLI.** `dnsrace --cli` runs the same engine without a window, prints a ranked table
+  and can export JSON or CSV. It is available on desktop builds.
 - **No telemetry, no account, no root and no background service.**
 
 ## Download
 
 | Platform | File |
 | --- | --- |
-| Linux x86_64 | `dnsrace-0.8.0-x86_64.AppImage` |
-| Linux aarch64 | `dnsrace-0.8.0-aarch64.AppImage` |
-| Windows x86_64 | `dnsrace-0.8.0-windows-x86_64.zip` |
-| macOS Intel | `dnsrace-0.8.0-macos-x86_64.zip` |
-| macOS Apple silicon | `dnsrace-0.8.0-macos-aarch64.zip` |
-| Android 8.0+ | `dnsrace-0.8.0-android-release-debugkey.apk` |
+| Linux x86_64 | `dnsrace-0.9.0-x86_64.AppImage` |
+| Linux aarch64 | `dnsrace-0.9.0-aarch64.AppImage` |
+| Windows x86_64 | `dnsrace-0.9.0-windows-x86_64.zip` |
+| macOS Intel | `dnsrace-0.9.0-macos-x86_64.zip` |
+| macOS Apple silicon | `dnsrace-0.9.0-macos-aarch64.zip` |
+| Android 8.0+ | `dnsrace-0.9.0-android-release-debugkey.apk` |
 
 Every release includes `SHA256SUMS.txt`; AppImages and the Android APK also have individual
 `.sha256` files. Pushes to `main` produce separate snapshot builds from the **Main snapshot**
 workflow; those artifacts are development snapshots, not tagged releases.
 
-The 0.8.0 APK is signed with the Android debug keystore, not a Play Store release key. It is
+The 0.9.0 APK is signed with the Android debug keystore, not a Play Store release key. It is
 fine for sideloading and testing.
 
 ### Linux
 
 ```sh
-chmod +x dnsrace-0.8.0-x86_64.AppImage
-./dnsrace-0.8.0-x86_64.AppImage
+chmod +x dnsrace-0.9.0-x86_64.AppImage
+./dnsrace-0.9.0-x86_64.AppImage
 ```
 
 If your system does not have FUSE, use the AppImage's extract-and-run mode:
 
 ```sh
-./dnsrace-0.8.0-x86_64.AppImage --appimage-extract-and-run
+./dnsrace-0.9.0-x86_64.AppImage --appimage-extract-and-run
 ```
 
 The x86_64 AppImage is built on Ubuntu 22.04 and the aarch64 AppImage on Ubuntu 24.04; both
-need a reasonably recent glibc and desktop stack. Installing DNS settings uses NetworkManager
-(`nmcli`) when available, otherwise systemd-resolved (`resolvectl`). A desktop polkit prompt may
-ask for permission.
+need a reasonably recent glibc and desktop stack. The app prefers native Wayland when the
+compositor is reachable and falls back to X11 when it is not, even if XWayland is available.
+Installing DNS settings uses NetworkManager (`nmcli`) when available, otherwise
+systemd-resolved (`resolvectl`). A desktop polkit prompt may ask for permission.
 
 ### Windows
 
@@ -116,7 +133,7 @@ on a best-effort basis.
 
 ### Android
 
-1. Download `dnsrace-0.8.0-android-release-debugkey.apk`.
+1. Download `dnsrace-0.9.0-android-release-debugkey.apk`.
 2. Allow installs from your browser or file manager when Android asks.
 3. Run a benchmark, open a resolver, and use **Set up this resolver** to follow the Private DNS
    (Android 9+) or Wi-Fi DNS (Android 8.0–8.1) steps.
@@ -124,12 +141,66 @@ on a best-effort basis.
 Or install over USB:
 
 ```sh
-adb install -r dnsrace-0.8.0-android-release-debugkey.apk
+adb install -r dnsrace-0.9.0-android-release-debugkey.apk
 ```
 
 Android does not let a normal app change Private DNS silently. dnsrace does not request a VPN,
 root, or a background service; it measures resolvers and hands you the value to enter. Reports
 are shared as text, so the app needs no storage permission or export folder.
+
+## Updates
+
+dnsrace checks the latest GitHub release when it starts, unless you turn
+**Check automatically on startup** off in Settings. **Check for updates** in Settings runs the
+same check on demand. A newer version shows its release notes and a download action.
+
+- **Linux AppImage, Windows and macOS:** the archive is downloaded, its SHA-256 is checked
+  against the release `SHA256SUMS.txt`, and the app installs the new version in place and
+  restarts. A failed check or checksum leaves the current version untouched.
+- **Android:** Android does not allow an app to replace itself silently. dnsrace opens the new
+  APK download link in your browser, and Android installs it after you confirm.
+
+No update channel or version skipping is used: there is one stable release stream.
+
+## Language and right-to-left layout
+
+Settings → Appearance → Language offers **System**, **English** and **Arabic**. **System**
+follows the device locale. Arabic switches every screen to right-to-left: the desktop rail moves
+to the right, the phone navigation mirrors, card content aligns to the right, and tables and
+result rows follow the reading direction. The bundled Noto Sans Arabic font covers Arabic text
+without a system font, and the interface stays usable in English on the same installation.
+
+Resolver names, endpoints and other technical values stay in Latin script, as do JSON and CSV
+keys, so scripts and saved reports keep working across languages.
+
+## Command line
+
+The same benchmark engine is available without a window:
+
+```sh
+dnsrace --cli                          # default catalogue, ranked table
+dnsrace --cli --profile quick --top 10
+dnsrace --cli --protocol dot --json result.json --csv result.csv
+dnsrace --cli --list                   # show what would be tested
+dnsrace --cli --help
+```
+
+Progress goes to stderr and the table to stdout, so `dnsrace --cli > result.txt` works. Use
+`--all` for the whole catalogue, `--no-system` to skip the current resolvers, and
+`--timeout`, `--jobs`, `--repeat` and `--family` for custom limits. JSON and CSV keep stable
+English keys for scripts. The release Windows binary uses the GUI subsystem, so the CLI is
+intended for Linux and macOS release builds (or a Windows debug build from a terminal).
+
+## Import, export and diagnostics
+
+Settings → Data can export custom resolvers and favourites to a JSON file and import them on
+another machine. Import merges entries, skips duplicates and invalid protocols, and reports how
+many entries were added. The default export path is shown in Settings and can be overridden with
+the path field.
+
+**Copy diagnostics** in Settings copies a plain-text support report: version, operating system
+and architecture, language, theme, profile and depth, current DNS, last run, update state,
+history/custom/favourite counts and config paths. It contains no telemetry and no account data.
 
 ## Using dnsrace
 
@@ -223,7 +294,7 @@ Downloads by default, or to the folder chosen in Settings.
 
 ## Building from source
 
-You need Rust **1.99.1** (the repository pins it in `rust-toolchain.toml`) and a working desktop
+You need Rust **1.100.0** (the repository pins it in `rust-toolchain.toml`) and a working desktop
 build environment. On Debian/Ubuntu:
 
 ```sh
@@ -239,12 +310,12 @@ cargo build --release --locked
 Build a Linux AppImage locally:
 
 ```sh
-./packaging/build-appimage.sh 0.8.0 x86_64 target/release/dnsrace dist
+cargo run -p xtask -- appimage 0.9.0 x86_64 target/release/dnsrace dist
 ```
 
-The script stages an AppDir, validates the desktop entry and AppStream metadata when the tools
+The task stages an AppDir, validates the desktop entry and AppStream metadata when the tools
 are installed, downloads `appimagetool` when necessary, and writes
-`dist/dnsrace-0.8.0-x86_64.AppImage` plus its `.sha256`.
+`dist/dnsrace-0.9.0-x86_64.AppImage` plus its `.sha256`.
 
 ### Android APK
 
@@ -264,7 +335,7 @@ cargo apk build --lib --release    # release APK
 
 `--lib` is required because the crate also has a desktop binary. The release build is signed
 with `CARGO_APK_RELEASE_KEYSTORE`, `CARGO_APK_RELEASE_KEYSTORE_PASSWORD`,
-`CARGO_APK_RELEASE_KEY_ALIAS` and `CARGO_APK_RELEASE_KEY_PASSWORD` when those are set; the 0.8.0
+`CARGO_APK_RELEASE_KEY_ALIAS` and `CARGO_APK_RELEASE_KEY_PASSWORD` when those are set; the 0.9.0
 release artifact uses the debug keystore unless CI secrets provide a private key.
 
 Run the test suite and lints:
@@ -294,6 +365,11 @@ controls, and check accessibility, touch sizes, large text and safe areas.
 - `src/system.rs` — cross-platform current-DNS detection and parsers.
 - `src/platform.rs` — apply/revert implementations for Linux, Windows and macOS.
 - `src/report.rs` — JSON, CSV, HTML and summary reports.
+- `src/i18n.rs` — English/Arabic strings, system-language selection and RTL helpers.
+- `src/update.rs` — GitHub release checks, SHA-256 verification and platform installers.
+- `src/cli.rs` — the `--cli` headless benchmark.
+- `src/diagnostics.rs` — the copyable support report.
+- `src/transfer.rs` — custom-resolver and favourite import/export.
 - `src/config.rs` — settings, history and applied-state persistence.
 - `packaging/` — AppImage assets, Android resources and the icon build script.
 

@@ -13,6 +13,7 @@ use crate::gui::components::{self, ButtonKind, Tone};
 use crate::gui::icons::{self, Icon};
 use crate::gui::state::{AppState, LayoutMode, ViewContext};
 use crate::gui::theme::{self, Tokens};
+use crate::i18n;
 use crate::servers::{Candidate, Category, Family, Kind};
 
 const PAGE_MAX_WIDTH: f32 = 1180.0;
@@ -44,11 +45,13 @@ pub fn render_servers(
     if visible.is_empty() {
         components::card(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("No resolvers match").size(16.0).strong());
+            ui.label(crate::i18n::rich("No resolvers match").size(16.0).strong());
             ui.label(
-                RichText::new("Change the search or clear a filter to see the catalogue again.")
-                    .size(13.0)
-                    .color(tokens.muted),
+                crate::i18n::rich(
+                    "Change the search or clear a filter to see the catalogue again.",
+                )
+                .size(13.0)
+                .color(tokens.muted),
             );
         });
         return;
@@ -60,17 +63,17 @@ pub fn render_servers(
     }
 
     if ui.available_width() >= TABLE_MIN_WIDTH + DETAIL_MIN_WIDTH + 32.0 {
-        ui.horizontal_top(|ui| {
+        i18n::horizontal_top(ui, |ui| {
             let table_width = (ui.available_width() - DETAIL_MIN_WIDTH - 16.0).max(TABLE_MIN_WIDTH);
             ui.allocate_ui_with_layout(
                 Vec2::new(table_width, ui.available_height()),
-                Layout::top_down(Align::Min),
+                Layout::top_down(i18n::align()),
                 |ui| table_card(state, &visible, ui, actions, tokens),
             );
             ui.add_space(16.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(ui.available_width(), ui.available_height()),
-                Layout::top_down(Align::Min),
+                Layout::top_down(i18n::align()),
                 |ui| detail_card(state, ui, actions, tokens),
             );
         });
@@ -94,14 +97,14 @@ fn toolbar(
             [ui.available_width(), 48.0],
             egui::TextEdit::singleline(&mut query)
                 .id_salt("servers-search")
-                .hint_text("Search provider, label or address")
+                .hint_text(crate::i18n::t("Search provider, label or address"))
                 .margin(Vec2::new(10.0, 12.0)),
         );
         if query != state.search {
             actions.push(UiAction::SetSearch(query));
         }
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        i18n::horizontal(ui, |ui| {
             if components::button(
                 ui,
                 "Test selected",
@@ -114,10 +117,9 @@ fn toolbar(
                 actions.push(UiAction::Run(RunScope::Selected));
             }
             ui.label(
-                RichText::new(format!(
+                crate::i18n::rich(i18n::fill(
                     "{} selected · {} available",
-                    state.selected_in_catalog(),
-                    state.visible_catalog().len()
+                    &[&state.selected_in_catalog(), &state.visible_catalog().len()],
                 ))
                 .size(12.0)
                 .color(tokens.muted),
@@ -126,11 +128,11 @@ fn toolbar(
         return;
     }
 
-    ui.horizontal(|ui| {
+    i18n::horizontal(ui, |ui| {
         let field_width = (ui.available_width() - 250.0).max(180.0);
         ui.allocate_ui_with_layout(
             Vec2::new(field_width, CONTROL_HEIGHT),
-            Layout::left_to_right(Align::Center),
+            i18n::row_layout(),
             |ui| {
                 ui.scope(|ui| {
                     ui.set_width((ui.available_width() - 40.0).max(140.0));
@@ -151,7 +153,7 @@ fn toolbar(
                 }
             },
         );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
             if components::button(
                 ui,
                 "Test selected",
@@ -164,10 +166,9 @@ fn toolbar(
                 actions.push(UiAction::Run(RunScope::Selected));
             }
             ui.label(
-                RichText::new(format!(
+                crate::i18n::rich(i18n::fill(
                     "{} selected · {} available",
-                    state.selected_in_catalog(),
-                    state.visible_catalog().len()
+                    &[&state.selected_in_catalog(), &state.visible_catalog().len()],
                 ))
                 .size(12.0)
                 .color(tokens.muted),
@@ -177,7 +178,7 @@ fn toolbar(
 }
 
 fn filters(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>, touch: bool) {
-    ui.horizontal_wrapped(|ui| {
+    i18n::horizontal_wrapped(ui, |ui| {
         if components::chip(ui, "All categories", state.category_filter.is_none(), touch).clicked()
         {
             actions.push(UiAction::SetCategoryFilter(None));
@@ -200,7 +201,7 @@ fn filters(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>, tou
         }
     });
     ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
+    i18n::horizontal_wrapped(ui, |ui| {
         for (kind, label) in [
             (None, "Any transport"),
             (Some(Kind::Plain), "Plain"),
@@ -251,10 +252,10 @@ fn mobile_cards(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Resolvers").size(17.0).strong());
+        i18n::horizontal(ui, |ui| {
+            ui.label(crate::i18n::rich("Resolvers").size(17.0).strong());
             ui.label(
-                RichText::new(format!("{} shown", visible.len()))
+                crate::i18n::rich(i18n::fill("{} shown", &[&visible.len()]))
                     .size(12.0)
                     .color(tokens.muted),
             );
@@ -283,7 +284,7 @@ fn mobile_cards(
         for candidate in &visible[first..last] {
             ui.allocate_ui_with_layout(
                 Vec2::new(ui.available_width(), card_height),
-                Layout::top_down(Align::Min),
+                Layout::top_down(i18n::align()),
                 |ui| {
                     ui.set_min_size(Vec2::new(ui.available_width(), card_height));
                     mobile_candidate(state, candidate, ui, actions, tokens);
@@ -313,9 +314,9 @@ fn mobile_candidate(
     let id = candidate.id.clone();
     let selected = state.settings.selected.contains(&id);
     let favourite = state.settings.favorites.contains(&id);
-    let select_label = format!("Select {display} {endpoint}");
-    let star_label = format!("Favourite {display} {endpoint}");
-    let open_label = format!("Open {display} {endpoint}");
+    let select_label = crate::i18n::fill("Select {} {}", &[&display, &endpoint]);
+    let star_label = crate::i18n::fill("Favourite {} {}", &[&display, &endpoint]);
+    let open_label = crate::i18n::fill("Open {} {}", &[&display, &endpoint]);
     let measured = state.find_row(&id);
 
     egui::Frame::new()
@@ -328,20 +329,16 @@ fn mobile_candidate(
         .inner_margin(10)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            i18n::horizontal(ui, |ui| {
                 if checkbox(ui, selected, &select_label, tokens, 44.0).clicked() {
                     actions.push(UiAction::ToggleSelected(id.clone()));
                 }
                 let text_width = (ui.available_width() - 52.0).max(80.0);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(text_width, 44.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        if mobile_row_button(ui, &display, &open_label, tokens).clicked() {
-                            actions.push(UiAction::ChooseRow(id.clone()));
-                        }
-                    },
-                );
+                ui.allocate_ui_with_layout(Vec2::new(text_width, 44.0), i18n::row_layout(), |ui| {
+                    if mobile_row_button(ui, &display, &open_label, tokens).clicked() {
+                        actions.push(UiAction::ChooseRow(id.clone()));
+                    }
+                });
                 if star(ui, favourite, &star_label, tokens, 44.0).clicked() {
                     actions.push(UiAction::ToggleFavorite(id.clone()));
                 }
@@ -349,7 +346,7 @@ fn mobile_candidate(
 
             ui.add(
                 egui::Label::new(
-                    RichText::new(&endpoint)
+                    crate::i18n::rich(&endpoint)
                         .monospace()
                         .size(12.0)
                         .color(tokens.muted),
@@ -359,7 +356,7 @@ fn mobile_candidate(
             ui.add_space(4.0);
             // Keep the compact card to one status row: the category is available in the
             // detail sheet and in the filter chips above.
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 components::pill(ui, kind_label(candidate.kind()), Tone::Accent);
                 if let Some(row) = measured {
                     components::pill(
@@ -377,12 +374,17 @@ fn mobile_candidate(
 fn mobile_row_button(ui: &mut egui::Ui, text: &str, label: &str, tokens: Tokens) -> egui::Response {
     let response = ui.add_sized(
         [ui.available_width(), 44.0],
-        egui::Button::new(RichText::new(text).size(15.0).strong().color(tokens.text))
-            .frame(false)
-            .wrap_mode(egui::TextWrapMode::Truncate)
-            // A grow atom after the title pins it to the leading edge; a plain button
-            // centers its text, which reads like a floating label between the controls.
-            .right_text(" "),
+        egui::Button::new(
+            crate::i18n::rich(text)
+                .size(15.0)
+                .strong()
+                .color(tokens.text),
+        )
+        .frame(false)
+        .wrap_mode(egui::TextWrapMode::Truncate)
+        // A grow atom after the title pins it to the leading edge; a plain button
+        // centers its text, which reads like a floating label between the controls.
+        .right_text(" "),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -397,14 +399,14 @@ fn table_card(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Catalogue").size(16.0).strong());
+        i18n::horizontal(ui, |ui| {
+            ui.label(crate::i18n::rich("Catalogue").size(16.0).strong());
             ui.label(
-                RichText::new(format!("{} shown", visible.len()))
+                crate::i18n::rich(i18n::fill("{} shown", &[&visible.len()]))
                     .size(12.0)
                     .color(tokens.muted),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
                 if components::button(
                     ui,
                     "Select none",
@@ -469,9 +471,9 @@ fn table_card(
                     let id = candidate.id.clone();
                     let selected = state.settings.selected.contains(&id);
                     let favourite = state.settings.favorites.contains(&id);
-                    let select_label = format!("Select {display} {endpoint}");
-                    let star_label = format!("Favourite {display} {endpoint}");
-                    let open_label = format!("Open {display} {endpoint}");
+                    let select_label = crate::i18n::fill("Select {} {}", &[&display, &endpoint]);
+                    let star_label = crate::i18n::fill("Favourite {} {}", &[&display, &endpoint]);
+                    let open_label = crate::i18n::fill("Open {} {}", &[&display, &endpoint]);
                     let measured = state.find_row(&id);
 
                     row.col(|ui| {
@@ -492,7 +494,7 @@ fn table_card(
                     row.col(|ui| {
                         ui.add(
                             egui::Label::new(
-                                RichText::new(&endpoint)
+                                crate::i18n::rich(&endpoint)
                                     .monospace()
                                     .size(12.0)
                                     .color(tokens.muted),
@@ -528,7 +530,7 @@ fn table_card(
 fn detail_card(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>, tokens: Tokens) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new("Resolver details").size(16.0).strong());
+        ui.label(crate::i18n::rich("Resolver details").size(16.0).strong());
         ui.add_space(6.0);
 
         let Some(candidate) = state
@@ -537,7 +539,7 @@ fn detail_card(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>,
             .and_then(|id| state.find_candidate(id))
         else {
             ui.label(
-                RichText::new(
+                crate::i18n::rich(
                     "Select a resolver from the table to see its endpoint, category and website.",
                 )
                 .size(13.0)
@@ -546,21 +548,21 @@ fn detail_card(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>,
             return;
         };
 
-        ui.label(RichText::new(&candidate.label).size(20.0).strong());
+        ui.label(crate::i18n::rich(&candidate.label).size(20.0).strong());
         ui.label(
-            RichText::new(format!("By {}", candidate.provider))
+            crate::i18n::rich(i18n::fill("By {}", &[&candidate.provider]))
                 .size(12.0)
                 .color(tokens.muted),
         );
         ui.add_space(6.0);
         ui.label(
-            RichText::new(candidate.endpoint())
+            crate::i18n::rich(candidate.endpoint())
                 .monospace()
                 .size(12.0)
                 .color(tokens.text),
         );
         ui.label(
-            RichText::new(format!(
+            crate::i18n::rich(format!(
                 "{} · {}",
                 candidate.category.label(),
                 kind_label(candidate.kind())
@@ -571,7 +573,7 @@ fn detail_card(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>,
 
         if !candidate.note.is_empty() {
             ui.add_space(6.0);
-            ui.label(RichText::new(&candidate.note).size(12.5));
+            ui.label(crate::i18n::rich(&candidate.note).size(12.5));
         }
 
         if let Some(row) = state.find_row(&candidate.id) {
@@ -582,7 +584,7 @@ fn detail_card(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>,
         }
 
         ui.add_space(10.0);
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             if components::button(ui, "Choose", ButtonKind::Primary, false, true).clicked() {
                 actions.push(UiAction::ChooseRow(candidate.id.clone()));
             }
@@ -604,7 +606,7 @@ fn detail_card(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>,
         });
         if !candidate.website.is_empty() {
             ui.label(
-                RichText::new(&candidate.website)
+                crate::i18n::rich(&candidate.website)
                     .size(11.5)
                     .color(tokens.muted),
             );
@@ -613,7 +615,7 @@ fn detail_card(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>,
 }
 
 fn row_metrics(ui: &mut egui::Ui, row: &Row, tokens: Tokens) {
-    ui.horizontal_wrapped(|ui| {
+    i18n::horizontal_wrapped(ui, |ui| {
         components::metric(
             ui,
             "Cached",
@@ -636,7 +638,7 @@ fn row_metrics(ui: &mut egui::Ui, row: &Row, tokens: Tokens) {
         );
     });
     ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
+    i18n::horizontal_wrapped(ui, |ui| {
         components::pill(
             ui,
             security_short(row.security_status()),
@@ -645,10 +647,9 @@ fn row_metrics(ui: &mut egui::Ui, row: &Row, tokens: Tokens) {
         components::pill(ui, row.note.label(), note_tone(row));
     });
     ui.label(
-        RichText::new(format!(
+        crate::i18n::rich(i18n::fill(
             "{} timeout(s) · {}",
-            row.timeouts,
-            row.transport.label()
+            &[&row.timeouts, &row.transport.label()],
         ))
         .size(11.5)
         .color(tokens.muted),
@@ -656,18 +657,31 @@ fn row_metrics(ui: &mut egui::Ui, row: &Row, tokens: Tokens) {
 }
 
 fn table_header(ui: &mut egui::Ui, label: &str, tokens: Tokens) {
-    ui.label(RichText::new(label).size(11.0).strong().color(tokens.muted));
+    ui.label(
+        crate::i18n::rich(label)
+            .size(11.0)
+            .strong()
+            .color(tokens.muted),
+    );
 }
 
 fn cell_text(value: Option<&str>) -> RichText {
     let text = value.unwrap_or("Unmeasured");
-    RichText::new(text).size(11.5)
+    crate::i18n::rich(text).size(11.5)
 }
 
 fn number_cell(ui: &mut egui::Ui, value: Option<f64>, tokens: Tokens) {
     let text = value.map_or_else(
-        || RichText::new("Not tested").size(11.5).color(tokens.muted),
-        |value| RichText::new(format!("{value:.1}")).monospace().size(11.5),
+        || {
+            crate::i18n::rich("Not tested")
+                .size(11.5)
+                .color(tokens.muted)
+        },
+        |value| {
+            crate::i18n::rich(format!("{value:.1}"))
+                .monospace()
+                .size(11.5)
+        },
     );
     ui.add(egui::Label::new(text).truncate());
 }
@@ -742,9 +756,14 @@ fn star(
 
 fn row_button(ui: &mut egui::Ui, text: &str, label: &str, tokens: Tokens) -> egui::Response {
     let response = ui.add(
-        egui::Label::new(RichText::new(text).size(13.0).strong().color(tokens.text))
-            .sense(Sense::click())
-            .truncate(),
+        egui::Label::new(
+            crate::i18n::rich(text)
+                .size(13.0)
+                .strong()
+                .color(tokens.text),
+        )
+        .sense(Sense::click())
+        .truncate(),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     response.on_hover_cursor(egui::CursorIcon::PointingHand)

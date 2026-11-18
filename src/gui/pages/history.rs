@@ -3,9 +3,7 @@
 //! History entries are immutable snapshots. Actions are emitted for reopen, export, delete and
 //! clear-all; the app owns the history vector and the confirmation state.
 
-use eframe::egui::{
-    self, Align, Color32, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2,
-};
+use eframe::egui::{self, Align, Color32, FontId, Layout, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 
 use crate::config::HistoryEntry;
 use crate::gui::actions::{ReportFormat, UiAction};
@@ -13,6 +11,7 @@ use crate::gui::components::{self, ButtonKind, Tone};
 use crate::gui::icons::{self, Icon};
 use crate::gui::state::{AppState, LayoutMode, ViewContext};
 use crate::gui::theme::{self, Tokens};
+use crate::i18n;
 use crate::profile::Profile;
 use crate::util::format_time;
 
@@ -40,9 +39,9 @@ pub fn render_history(
     if state.history.is_empty() {
         components::card(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("No saved runs yet").size(16.0).strong());
+            ui.label(crate::i18n::rich("No saved runs yet").size(16.0).strong());
             ui.label(
-                RichText::new("Finish a benchmark and it will appear here with its winner.")
+                crate::i18n::rich("Finish a benchmark and it will appear here with its winner.")
                     .size(13.0)
                     .color(tokens.muted),
             );
@@ -61,17 +60,17 @@ pub fn render_history(
     ui.add_space(CARD_GAP);
 
     if wide {
-        ui.horizontal_top(|ui| {
+        i18n::horizontal_top(ui, |ui| {
             let list_width = (ui.available_width() - DETAIL_MIN_WIDTH - 16.0).max(LIST_MIN_WIDTH);
             ui.allocate_ui_with_layout(
                 Vec2::new(list_width, ui.available_height()),
-                Layout::top_down(Align::Min),
+                Layout::top_down(i18n::align()),
                 |ui| list_card(state, ui, actions, tokens, touch),
             );
             ui.add_space(16.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(ui.available_width(), ui.available_height()),
-                Layout::top_down(Align::Min),
+                Layout::top_down(i18n::align()),
                 |ui| {
                     if state.history_selected.is_some() {
                         detail_card(state, ui, actions, tokens, touch);
@@ -93,14 +92,14 @@ pub fn render_history(
 fn trend_card(state: &AppState, ui: &mut egui::Ui, tokens: Tokens) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
+        i18n::horizontal(ui, |ui| {
             icons::paint_in(ui, Icon::History, 18.0, tokens.accent, Sense::hover());
-            ui.label(RichText::new("Winner trend").size(16.0).strong());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(crate::i18n::rich("Winner trend").size(16.0).strong());
+            ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
                 let scores = recent_scores(state);
                 let measurable = scores.iter().filter(|score| score.is_some()).count();
                 ui.label(
-                    RichText::new(format!("{measurable} measured run(s)"))
+                    crate::i18n::rich(i18n::fill("{} measured run(s)", &[&measurable]))
                         .size(12.0)
                         .color(tokens.muted),
                 );
@@ -112,7 +111,7 @@ fn trend_card(state: &AppState, ui: &mut egui::Ui, tokens: Tokens) {
         let finite: Vec<f64> = scores.iter().flatten().copied().collect();
         if finite.len() < 2 {
             ui.label(
-                RichText::new("A trend appears after two runs with a measurable winner.")
+                crate::i18n::rich("A trend appears after two runs with a measurable winner.")
                     .size(13.0)
                     .color(tokens.muted),
             );
@@ -179,14 +178,14 @@ fn list_card(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Saved runs").size(16.0).strong());
+        i18n::horizontal(ui, |ui| {
+            ui.label(crate::i18n::rich("Saved runs").size(16.0).strong());
             ui.label(
-                RichText::new(format!("{} run(s)", state.history.len()))
+                crate::i18n::rich(i18n::fill("{} run(s)", &[&state.history.len()]))
                     .size(12.0)
                     .color(tokens.muted),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
                 if components::button(
                     ui,
                     "Clear history",
@@ -267,7 +266,7 @@ fn run_row(
             egui::Role::Button,
             true,
             selected,
-            format!("Open run {}", index + 1),
+            crate::i18n::fill("Open run {}", &[&(index + 1)]),
         )
     });
     if response.clicked() {
@@ -294,15 +293,17 @@ fn detail_card(
             return;
         };
 
-        ui.label(RichText::new("Run details").size(16.0).strong());
+        ui.label(crate::i18n::rich("Run details").size(16.0).strong());
         ui.add_space(6.0);
-        ui.label(RichText::new(entry.label()).size(13.5).strong());
+        ui.label(crate::i18n::rich(entry.label()).size(13.5).strong());
         ui.label(
-            RichText::new(format!(
+            crate::i18n::rich(i18n::fill(
                 "Profile: {} · {} cached rounds · {} random lookups",
-                entry.profile.map_or("Custom", Profile::label),
-                entry.depth.map_or(0, |depth| depth.cached_rounds),
-                entry.depth.map_or(0, |depth| depth.random_lookups)
+                &[
+                    &entry.profile.map_or("Custom", Profile::label),
+                    &entry.depth.map_or(0, |depth| depth.cached_rounds),
+                    &entry.depth.map_or(0, |depth| depth.random_lookups),
+                ],
             ))
             .monospace()
             .size(11.5)
@@ -310,7 +311,7 @@ fn detail_card(
         );
 
         ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             components::metric(
                 ui,
                 "Duration",
@@ -323,7 +324,7 @@ fn detail_card(
 
         if let Some(winner) = entry.winner() {
             ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 components::pill(
                     ui,
                     winner.security_status().label(),
@@ -340,9 +341,9 @@ fn detail_card(
 
         if !entry.current_dns.is_empty() {
             ui.label(
-                RichText::new(format!(
+                crate::i18n::rich(i18n::fill(
                     "Current DNS: {}",
-                    join_addresses(&entry.current_dns)
+                    &[&join_addresses(&entry.current_dns)],
                 ))
                 .monospace()
                 .size(11.5)
@@ -351,14 +352,14 @@ fn detail_card(
         }
         if let Some(data_center) = &entry.data_center {
             ui.label(
-                RichText::new(format!("Data center: {data_center}"))
+                crate::i18n::rich(i18n::fill("Data center: {}", &[&data_center]))
                     .size(11.5)
                     .color(tokens.muted),
             );
         }
 
         ui.add_space(10.0);
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             if components::button(ui, "Reopen run", ButtonKind::Primary, touch, true).clicked() {
                 actions.push(UiAction::ReopenHistory(index));
             }
@@ -374,7 +375,7 @@ fn detail_card(
                 for format in [ReportFormat::Json, ReportFormat::Csv, ReportFormat::Html] {
                     if components::button(
                         ui,
-                        &format!("Export {}", format.label()),
+                        &crate::i18n::fill("Export {}", &[&format.label()]),
                         ButtonKind::Secondary,
                         touch,
                         true,
@@ -400,10 +401,10 @@ fn detail_placeholder(ui: &mut egui::Ui, tokens: Tokens) {
 }
 
 fn detail_placeholder_contents(ui: &mut egui::Ui, tokens: Tokens) {
-    ui.label(RichText::new("Run details").size(16.0).strong());
+    ui.label(crate::i18n::rich("Run details").size(16.0).strong());
     ui.add_space(4.0);
     ui.label(
-        RichText::new("Select a saved run to reopen, export or delete it.")
+        crate::i18n::rich("Select a saved run to reopen, export or delete it.")
             .size(13.0)
             .color(tokens.muted),
     );
@@ -412,15 +413,15 @@ fn detail_placeholder_contents(ui: &mut egui::Ui, tokens: Tokens) {
 fn clear_confirm_card(ui: &mut egui::Ui, actions: &mut Vec<UiAction>, tokens: Tokens, touch: bool) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.vertical(|ui| {
-            ui.label(RichText::new("Delete all history?").size(15.0).strong());
+        i18n::vertical(ui, |ui| {
+            ui.label(crate::i18n::rich("Delete all history?").size(15.0).strong());
             ui.label(
-                RichText::new("This removes every saved run from this device.")
+                crate::i18n::rich("This removes every saved run from this device.")
                     .size(12.5)
                     .color(tokens.muted),
             );
             ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 if components::button(ui, "Delete all runs", ButtonKind::Danger, touch, true)
                     .clicked()
                 {

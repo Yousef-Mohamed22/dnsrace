@@ -1,7 +1,8 @@
 Inter is Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter).
 JetBrains Mono is Copyright (c) 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono).
+Noto Sans Arabic is Copyright (c) 2022 The Noto Project Authors (https://github.com/notofonts/arabic).
 
-Both font families are licensed under the SIL Open Font License, Version 1.1.
+All font families are licensed under the SIL Open Font License, Version 1.1.
 
 ===== Inter LICENSE =====
 Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter)

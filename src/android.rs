@@ -1,6 +1,6 @@
 //! The Android platform boundary.
 //!
-//! The 0.8.0 Android app never changes DNS itself. It copies a DoT hostname, opens the matching
+//! The Android app never changes DNS itself. It copies a DoT hostname, opens the matching
 //! settings screen and shares a text report. Those operations need a thin platform host; keeping
 //! them behind a trait means the backend, guide and buttons can be tested on a desktop.
 

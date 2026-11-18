@@ -18,6 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::bench::{Row, Steering};
+use crate::i18n::Language;
 use crate::platform::AppliedDns;
 use crate::profile::{Profile, TestDepth};
 use crate::providers;
@@ -63,8 +64,8 @@ impl Theme {
         Theme::HighContrast,
     ];
 
-    pub const fn label(self) -> &'static str {
-        match self {
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
             Theme::System => "System",
             Theme::Dark => "Dark",
             Theme::Light => "Light",
@@ -73,7 +74,7 @@ impl Theme {
             Theme::SolarizedLight => "Solarized Light",
             Theme::Dracula => "Dracula",
             Theme::HighContrast => "High contrast",
-        }
+        })
     }
 
     /// Whether the preset is a dark palette. `System` has no fixed answer.
@@ -84,8 +85,8 @@ impl Theme {
         )
     }
 
-    pub const fn description(self) -> &'static str {
-        match self {
+    pub fn description(self) -> &'static str {
+        crate::i18n::t(match self {
             Theme::System => "Follow the operating system's light or dark setting.",
             Theme::Dark => "The default neutral dark palette.",
             Theme::Light => "A clean light palette for bright rooms.",
@@ -94,7 +95,7 @@ impl Theme {
             Theme::SolarizedLight => "Warm, low-contrast light palette.",
             Theme::Dracula => "Dark purple with vivid accents.",
             Theme::HighContrast => "Maximum contrast for accessibility.",
-        }
+        })
     }
 }
 
@@ -116,6 +117,10 @@ pub struct Settings {
     pub custom: Vec<CustomResolver>,
     pub export_dir: Option<PathBuf>,
     pub theme: Theme,
+    /// Interface language; `System` follows the device at startup.
+    pub language: Language,
+    /// Check GitHub for a newer release when the app starts.
+    pub check_updates: bool,
     /// The named benchmark preset. Custom keeps the user's own values.
     pub profile: Profile,
     /// Candidate ids starred by the user.
@@ -142,6 +147,8 @@ impl Default for Settings {
             custom: Vec::new(),
             export_dir: None,
             theme: Theme::Dark,
+            language: Language::System,
+            check_updates: true,
             profile: Profile::Balanced,
             favorites: BTreeSet::new(),
             cached_rounds: TestDepth::BALANCED.cached_rounds,
@@ -169,6 +176,8 @@ struct SettingsData {
     custom: Vec<CustomResolver>,
     export_dir: Option<PathBuf>,
     theme: Theme,
+    language: Language,
+    check_updates: bool,
     profile: Option<Profile>,
     favorites: BTreeSet<String>,
     cached_rounds: Option<usize>,
@@ -192,6 +201,8 @@ impl Default for SettingsData {
             custom: settings.custom,
             export_dir: settings.export_dir,
             theme: settings.theme,
+            language: settings.language,
+            check_updates: settings.check_updates,
             profile: None,
             favorites: settings.favorites,
             cached_rounds: None,
@@ -232,6 +243,8 @@ impl<'de> Deserialize<'de> for Settings {
             custom: data.custom,
             export_dir: data.export_dir,
             theme: data.theme,
+            language: data.language,
+            check_updates: data.check_updates,
             profile,
             favorites: data.favorites,
             cached_rounds: depth.cached_rounds,
@@ -502,7 +515,7 @@ pub fn clear_applied() -> io::Result<()> {
     }
 }
 
-fn export_dir(settings: &Settings) -> PathBuf {
+pub fn export_dir(settings: &Settings) -> PathBuf {
     app_paths()
         .and_then(|paths| paths.export_dir)
         .or_else(|| settings.export_dir.clone())
@@ -533,6 +546,11 @@ pub fn default_export_path(extension: &str, settings: &Settings) -> PathBuf {
         }
         suffix = suffix.saturating_add(1);
     }
+}
+
+/// Where resolver/favourite exports live, so the same file can be imported on another machine.
+pub fn resolver_export_path(settings: &Settings) -> PathBuf {
+    export_dir(settings).join("dnsrace-resolvers.json")
 }
 
 /// Write a report to a fresh file. `create_new` closes the race between choosing a name and
@@ -573,6 +591,7 @@ pub fn applied_age(applied: &AppliedDns) -> String {
         0..=59 => "just now".to_string(),
         60..=3599 => format!("{} min ago", age / 60),
         3600..=86_399 => format!("{} h ago", age / 3600),
+        86_400..=172_799 => "1 day ago".to_string(),
         _ => format!("{} days ago", age / 86_400),
     }
 }

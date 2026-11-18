@@ -36,6 +36,11 @@
   </keywords>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.9.0" date="2026-11-17">
+      <description>
+        <p>A large release with a full Arabic interface and right-to-left layout, in-app updates for Linux, Windows and macOS with SHA-256 verification, a headless benchmark CLI, resolver and favourite import/export, and a copyable diagnostics report. Adds an optional startup update check and bumps Rust to 1.100.0.</p>
+      </description>
+    </release>
     <release version="0.8.0" date="2026-11-11">
       <description>
         <p>A large release with an adaptive desktop and Android interface. Android 8.0 and newer can benchmark from the phone itself and receive guided Private DNS or Wi-Fi DNS setup without root, a VPN service or a background service. Adds test profiles, favourites, explained recommendations with current-DNS deltas, recent-history trends, richer run metrics, a new icon, eight themes, responsive phone layouts with touch-sized controls, and a debug-signed APK alongside the desktop builds.</p>

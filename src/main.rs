@@ -5,6 +5,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if dnsrace::cli::requested(&args) {
+        return match dnsrace::cli::run(&args) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("dnsrace: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     match dnsrace::gui::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {

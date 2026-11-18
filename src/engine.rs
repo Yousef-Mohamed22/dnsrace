@@ -29,13 +29,13 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const fn label(self) -> &'static str {
-        match self {
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
             Stage::Scan => "Checking which servers answer",
             Stage::Test => "Measuring latency and DNSSEC",
             Stage::Steering => "Checking where hostnames are steered",
             Stage::Done => "Finished",
-        }
+        })
     }
 }
 

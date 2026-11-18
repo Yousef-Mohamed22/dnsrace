@@ -4,6 +4,7 @@
 //! them. That boundary is what makes every button testable without a window.
 
 use crate::config::Theme;
+use crate::i18n::Language;
 use crate::profile::Profile;
 use crate::servers::{Category, Family, Kind, Protocol};
 
@@ -13,6 +14,7 @@ pub enum AboutLink {
     Project,
     Issues,
     Licence,
+    Releases,
 }
 
 impl AboutLink {
@@ -21,6 +23,7 @@ impl AboutLink {
             AboutLink::Project => "https://github.com/Yousef-Mohamed22/dnsrace",
             AboutLink::Issues => "https://github.com/Yousef-Mohamed22/dnsrace/issues",
             AboutLink::Licence => "https://github.com/Yousef-Mohamed22/dnsrace/blob/main/LICENSE",
+            AboutLink::Releases => "https://github.com/Yousef-Mohamed22/dnsrace/releases/latest",
         }
     }
 }
@@ -37,22 +40,22 @@ pub enum Page {
 impl Page {
     pub const ALL: [Page; 4] = [Page::Overview, Page::Servers, Page::History, Page::Settings];
 
-    pub const fn label(self) -> &'static str {
-        match self {
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
             Page::Overview => "Overview",
             Page::Servers => "Servers",
             Page::History => "History",
             Page::Settings => "Settings",
-        }
+        })
     }
 
-    pub const fn description(self) -> &'static str {
-        match self {
+    pub fn description(self) -> &'static str {
+        crate::i18n::t(match self {
             Page::Overview => "Measure your connection and see what to use.",
             Page::Servers => "Choose which public resolvers to test.",
             Page::History => "Compare past runs and reopen a result.",
             Page::Settings => "Appearance, benchmark defaults and data.",
-        }
+        })
     }
 }
 
@@ -105,6 +108,9 @@ pub enum UiAction {
     SetFamily(Family),
     SetProfile(Profile),
     SetTheme(Theme),
+    SetLanguage(Language),
+    SetCheckUpdates(bool),
+    SetImportPath(String),
     SetSearch(String),
     SetCategoryFilter(Option<Category>),
     SetKindFilter(Option<Kind>),
@@ -164,6 +170,11 @@ pub enum UiAction {
     SetHostnames(String),
     SetIncludeSystem(bool),
     SetIncludeNearby(bool),
+    CheckUpdates,
+    InstallUpdate,
+    CopyDiagnostics,
+    ExportResolverData,
+    ImportResolverData,
     OpenAbout,
     CloseAbout,
     OpenAboutLink(AboutLink),

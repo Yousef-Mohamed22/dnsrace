@@ -59,7 +59,12 @@ pub enum Note {
 }
 
 impl Note {
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(self.label_en())
+    }
+
+    /// The stable English label for machine-readable reports and the command line.
+    pub fn label_en(self) -> &'static str {
         match self {
             Note::Ok => "OK",
             Note::Hijacks => "Hijacks NXDOMAIN",
@@ -80,7 +85,12 @@ pub enum SecurityStatus {
 }
 
 impl SecurityStatus {
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(self.label_en())
+    }
+
+    /// The stable English label for machine-readable reports and the command line.
+    pub fn label_en(self) -> &'static str {
         match self {
             SecurityStatus::Validated => "DNSSEC validated",
             SecurityStatus::Insecure => "No DNSSEC",
@@ -90,7 +100,12 @@ impl SecurityStatus {
         }
     }
 
-    pub const fn short(self) -> &'static str {
+    pub fn short(self) -> &'static str {
+        crate::i18n::t(self.short_en())
+    }
+
+    /// The stable English short label for the command line.
+    pub fn short_en(self) -> &'static str {
         match self {
             SecurityStatus::Validated => "DNSSEC ✓",
             SecurityStatus::Insecure => "No DNSSEC",

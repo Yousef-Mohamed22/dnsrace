@@ -4,7 +4,7 @@
 //! status card. The page itself comes from `gui::pages`, so the same content can be framed by the
 //! phone shell without being duplicated.
 
-use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Sense, Vec2};
+use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, Sense, Vec2};
 
 use crate::gui::actions::{Page, RunScope, UiAction};
 use crate::gui::components::{self, ButtonKind, Tone};
@@ -12,6 +12,7 @@ use crate::gui::icons::{self, Icon};
 use crate::gui::pages;
 use crate::gui::state::{AppState, ViewContext};
 use crate::gui::theme::{self, Tokens};
+use crate::i18n;
 
 const RAIL_WIDTH: f32 = 232.0;
 const CONTROL_HEIGHT: f32 = 40.0;
@@ -24,13 +25,13 @@ pub fn render_desktop(
     actions: &mut Vec<UiAction>,
 ) {
     let tokens = theme::tokens(state.settings.theme, ui.ctx().theme());
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
+    i18n::horizontal_top(ui, |ui| {
+        i18n::vertical(ui, |ui| {
             ui.set_width(RAIL_WIDTH);
             render_rail(state, cx, ui, actions, tokens);
         });
         ui.separator();
-        ui.vertical(|ui| {
+        i18n::vertical(ui, |ui| {
             render_content(state, cx, ui, actions, tokens);
         });
     });
@@ -44,11 +45,11 @@ fn render_rail(
     tokens: Tokens,
 ) {
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
+    i18n::horizontal(ui, |ui| {
         paint_brand(ui);
-        ui.vertical(|ui| {
-            ui.label(RichText::new("dnsrace").size(18.0).strong());
-            ui.label(RichText::new(cx.version).size(11.0).color(tokens.muted));
+        i18n::vertical(ui, |ui| {
+            ui.label(crate::i18n::rich("dnsrace").size(18.0).strong());
+            ui.label(crate::i18n::rich(cx.version).size(11.0).color(tokens.muted));
         });
     });
 
@@ -72,7 +73,7 @@ fn render_rail(
 
     ui.add_space(18.0);
     ui.label(
-        RichText::new("WORKSPACE")
+        crate::i18n::rich(crate::i18n::t("WORKSPACE"))
             .size(10.0)
             .strong()
             .color(tokens.muted),
@@ -99,16 +100,20 @@ fn render_content(
     tokens: Tokens,
 ) {
     ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(RichText::new(page_heading(state.page)).size(22.0).strong());
+    i18n::horizontal(ui, |ui| {
+        i18n::vertical(ui, |ui| {
             ui.label(
-                RichText::new(state.page.description())
+                crate::i18n::rich(page_heading(state.page))
+                    .size(22.0)
+                    .strong(),
+            );
+            ui.label(
+                crate::i18n::rich(state.page.description())
                     .size(13.0)
                     .color(tokens.muted),
             );
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
             let (label, tone) = if state.running {
                 ("Running", Tone::Accent)
             } else if state.result.is_some() {
@@ -116,7 +121,7 @@ fn render_content(
             } else {
                 ("Ready", Tone::Neutral)
             };
-            components::pill(ui, label, tone);
+            components::pill(ui, crate::i18n::t(label), tone);
         });
     });
     if let Some(notice) = state.notices.last() {
@@ -211,22 +216,22 @@ fn page_icon(page: Page) -> Icon {
 fn network_card(state: &AppState, ui: &mut egui::Ui, actions: &mut Vec<UiAction>, tokens: Tokens) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
+        i18n::horizontal(ui, |ui| {
             icons::paint_in(ui, Icon::Server, 16.0, tokens.success, Sense::hover());
-            ui.label(RichText::new("Network status").size(13.0).strong());
+            ui.label(crate::i18n::rich("Network status").size(13.0).strong());
         });
         ui.add_space(6.0);
 
         let current = state.current_dns();
         if current.is_empty() {
             ui.label(
-                RichText::new("No DNS detected")
+                crate::i18n::rich("No DNS detected")
                     .size(12.0)
                     .color(tokens.muted),
             );
         } else {
             ui.label(
-                RichText::new(join_addresses(&current))
+                crate::i18n::rich(join_addresses(&current))
                     .monospace()
                     .size(12.0),
             );

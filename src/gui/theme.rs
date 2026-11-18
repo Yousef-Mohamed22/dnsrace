@@ -153,6 +153,12 @@ fn install_fonts(ctx: &egui::Context) {
         ))),
     );
     fonts.font_data.insert(
+        "noto-arabic".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../../assets/fonts/NotoSansArabic-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
         "jetbrains-mono".into(),
         Arc::new(FontData::from_static(include_bytes!(
             "../../assets/fonts/JetBrainsMono-Regular.ttf"
@@ -162,12 +168,11 @@ fn install_fonts(ctx: &egui::Context) {
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
     proportional.insert(0, "inter-regular".into());
     proportional.insert(1, "inter-semibold".into());
+    proportional.insert(2, "noto-arabic".into());
 
-    fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default()
-        .insert(0, "jetbrains-mono".into());
+    let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
+    monospace.insert(0, "jetbrains-mono".into());
+    monospace.insert(1, "noto-arabic".into());
 
     ctx.set_fonts(fonts);
 }
@@ -268,7 +273,10 @@ mod tests {
         install(&ctx, Theme::Light);
         let mut label_height = 0.0;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            label_height = ui.label("dnsrace 0.8.0").rect.height();
+            label_height = ui
+                .label(concat!("dnsrace ", env!("CARGO_PKG_VERSION")))
+                .rect
+                .height();
             ui.monospace("1.1.1.1:53");
         });
         output.textures_delta.clear();

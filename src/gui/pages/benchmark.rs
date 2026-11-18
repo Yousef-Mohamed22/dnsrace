@@ -3,7 +3,7 @@
 
 use std::net::IpAddr;
 
-use eframe::egui::{self, Align, Layout, RichText, Sense, Vec2};
+use eframe::egui::{self, Align, Layout, Sense, Vec2};
 
 use crate::bench::{Row, SecurityStatus};
 use crate::gui::actions::{RunScope, UiAction};
@@ -11,6 +11,7 @@ use crate::gui::components::{self, ButtonKind, Tone};
 use crate::gui::icons::{self, Icon};
 use crate::gui::state::{AppState, LayoutMode, ViewContext};
 use crate::gui::theme::{self, Tokens};
+use crate::i18n;
 use crate::profile::Profile;
 use crate::recommend::Recommendation;
 
@@ -33,12 +34,12 @@ pub fn render_overview(
     // cramped, especially after system-bar insets in landscape.
     let two_columns = ui.available_width() >= 820.0;
     if two_columns {
-        ui.horizontal_top(|ui| {
+        i18n::horizontal_top(ui, |ui| {
             let gap = 16.0;
             let main_width = ((ui.available_width() - gap) * 0.62).max(420.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(main_width, ui.available_height()),
-                Layout::top_down(Align::Min),
+                Layout::top_down(i18n::align()),
                 |ui| {
                     current_dns_card(state, cx, ui, actions, tokens, touch);
                     ui.add_space(CARD_GAP);
@@ -51,7 +52,7 @@ pub fn render_overview(
             let side_width = ui.available_width();
             ui.allocate_ui_with_layout(
                 Vec2::new(side_width, ui.available_height()),
-                Layout::top_down(Align::Min),
+                Layout::top_down(i18n::align()),
                 |ui| {
                     recommendation_card(state, cx, ui, actions, tokens, touch);
                     ui.add_space(CARD_GAP);
@@ -73,9 +74,9 @@ pub fn render_overview(
 }
 
 fn card_heading(ui: &mut egui::Ui, icon: Icon, title: &str, tokens: Tokens) {
-    ui.horizontal(|ui| {
+    i18n::horizontal(ui, |ui| {
         icons::paint_in(ui, icon, 18.0, tokens.accent, Sense::hover());
-        ui.label(RichText::new(title).size(16.0).strong());
+        ui.label(crate::i18n::rich(title).size(16.0).strong());
     });
 }
 
@@ -89,9 +90,9 @@ fn current_dns_card(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
+        i18n::horizontal(ui, |ui| {
             card_heading(ui, Icon::Server, "Current DNS", tokens);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
                 if components::button(
                     ui,
                     "Refresh detection",
@@ -110,18 +111,18 @@ fn current_dns_card(
         let current = state.current_dns();
         if current.is_empty() {
             ui.label(
-                RichText::new("Not detected yet")
+                crate::i18n::rich("Not detected yet")
                     .size(15.0)
                     .color(tokens.muted),
             );
             ui.label(
-                RichText::new("Refresh detection to compare a future run with this network.")
+                crate::i18n::rich("Refresh detection to compare a future run with this network.")
                     .size(12.0)
                     .color(tokens.muted),
             );
         } else {
             ui.label(
-                RichText::new(join_addresses(&current))
+                crate::i18n::rich(join_addresses(&current))
                     .monospace()
                     .size(19.0)
                     .strong(),
@@ -129,17 +130,17 @@ fn current_dns_card(
             if let Some(system) = &state.system {
                 let mut details = Vec::new();
                 if let Some(interface) = &system.interface {
-                    details.push(format!("on {interface}"));
+                    details.push(i18n::fill("on {}", &[interface]));
                 }
                 if let Some(source) = &system.source {
-                    details.push(format!("via {source}"));
+                    details.push(i18n::fill("via {}", &[source]));
                 }
                 if let Some(matched) = state.recommendation().current {
-                    details.push(format!("matched {}", matched.label));
+                    details.push(i18n::fill("matched {}", &[&matched.label]));
                 }
                 if !details.is_empty() {
                     ui.label(
-                        RichText::new(details.join(" · "))
+                        crate::i18n::rich(details.join(" · "))
                             .size(12.0)
                             .color(tokens.muted),
                     );
@@ -160,7 +161,7 @@ fn profile_card(
         ui.set_width(ui.available_width());
         card_heading(ui, Icon::Gauge, "Benchmark setup", tokens);
         ui.add_space(8.0);
-        ui.label(RichText::new("Profile").size(12.0).color(tokens.muted));
+        ui.label(crate::i18n::rich("Profile").size(12.0).color(tokens.muted));
 
         // A profile change during a run would desync the report from the settings that
         // produced it; disable the whole control until the run finishes.
@@ -171,7 +172,7 @@ fn profile_card(
                 actions.push(UiAction::SetProfile(profile));
             }
             ui.label(
-                RichText::new(profile.description())
+                crate::i18n::rich(profile.description())
                     .size(13.0)
                     .color(tokens.muted),
             );
@@ -179,28 +180,32 @@ fn profile_card(
 
         let values = state.settings.profile.values();
         let detail = match values {
-            Some(values) => format!(
+            Some(values) => i18n::fill(
                 "{} ms timeout · {} jobs · {} repeat · {} cached rounds · {} random lookups",
-                values.timeout_ms,
-                values.jobs,
-                values.repeat,
-                values.cached_rounds,
-                values.random_lookups
+                &[
+                    &values.timeout_ms,
+                    &values.jobs,
+                    &values.repeat,
+                    &values.cached_rounds,
+                    &values.random_lookups,
+                ],
             ),
             None => {
                 let depth = state.settings.depth();
-                format!(
+                i18n::fill(
                     "{} ms timeout · {} jobs · {} repeat · {} cached rounds · {} random lookups",
-                    state.settings.timeout_ms,
-                    state.settings.jobs,
-                    state.settings.repeat,
-                    depth.cached_rounds,
-                    depth.random_lookups
+                    &[
+                        &state.settings.timeout_ms,
+                        &state.settings.jobs,
+                        &state.settings.repeat,
+                        &depth.cached_rounds,
+                        &depth.random_lookups,
+                    ],
                 )
             }
         };
         ui.label(
-            RichText::new(detail)
+            crate::i18n::rich(detail)
                 .monospace()
                 .size(11.5)
                 .color(tokens.muted),
@@ -211,7 +216,7 @@ fn profile_card(
         ui.add_space(4.0);
         let selected = state.selected_in_catalog();
         let visible = state.visible_catalog().len();
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             if components::button(
                 ui,
                 "Test selected",
@@ -238,12 +243,15 @@ fn profile_card(
         // Keep the counts on their own line: beside two touch-sized buttons they wrap
         // mid-phrase on a 360 dp phone.
         ui.label(
-            RichText::new(format!("{selected} selected · {visible} available"))
-                .size(12.0)
-                .color(tokens.muted),
+            crate::i18n::rich(i18n::fill(
+                "{} selected · {} available",
+                &[&selected, &visible],
+            ))
+            .size(12.0)
+            .color(tokens.muted),
         );
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             let favorites = state.favourites_in_catalog();
             if components::button(
                 ui,
@@ -270,7 +278,7 @@ fn profile_card(
         });
         if state.favourites_in_catalog() == 0 {
             ui.label(
-                RichText::new(if state.settings.favorites.is_empty() {
+                crate::i18n::rich(if state.settings.favorites.is_empty() {
                     "Star at least one resolver in Servers to enable Test favourites."
                 } else {
                     "No favourite is available for the current protocol."
@@ -298,12 +306,12 @@ fn recommendation_card(
         let recommendation = state.recommendation();
         let Some(overall) = recommendation.overall.clone() else {
             ui.label(
-                RichText::new("No recommendation yet")
+                crate::i18n::rich("No recommendation yet")
                     .size(15.0)
                     .color(tokens.muted),
             );
             ui.label(
-                RichText::new("Run a benchmark and the best resolver will be explained here.")
+                crate::i18n::rich("Run a benchmark and the best resolver will be explained here.")
                     .size(12.0)
                     .color(tokens.muted),
             );
@@ -314,18 +322,18 @@ fn recommendation_card(
         // phone viewport, which then pushed the whole shell (and the bottom navigation) out
         // of bounds. Stack the two blocks when the card is narrow.
         if ui.available_width() < 360.0 {
-            ui.label(RichText::new(&overall.label).size(22.0).strong());
+            ui.label(crate::i18n::rich(&overall.label).size(22.0).strong());
             ui.label(
-                RichText::new(&overall.endpoint)
+                crate::i18n::rich(&overall.endpoint)
                     .monospace()
                     .size(12.0)
                     .color(tokens.muted),
             );
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Latency").size(11.0).color(tokens.muted));
+            i18n::horizontal(ui, |ui| {
+                ui.label(crate::i18n::rich("Latency").size(11.0).color(tokens.muted));
                 ui.label(
-                    RichText::new(format!("{:.1} ms", overall.score))
+                    crate::i18n::rich(format!("{:.1} ms", overall.score))
                         .monospace()
                         .size(22.0)
                         .strong()
@@ -333,21 +341,21 @@ fn recommendation_card(
                 );
             });
         } else {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&overall.label).size(22.0).strong());
+            i18n::horizontal(ui, |ui| {
+                i18n::vertical(ui, |ui| {
+                    ui.label(crate::i18n::rich(&overall.label).size(22.0).strong());
                     ui.label(
-                        RichText::new(&overall.endpoint)
+                        crate::i18n::rich(&overall.endpoint)
                             .monospace()
                             .size(12.0)
                             .color(tokens.muted),
                     );
                 });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("Latency").size(11.0).color(tokens.muted));
+                ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
+                    i18n::vertical(ui, |ui| {
+                        ui.label(crate::i18n::rich("Latency").size(11.0).color(tokens.muted));
                         ui.label(
-                            RichText::new(format!("{:.1} ms", overall.score))
+                            crate::i18n::rich(format!("{:.1} ms", overall.score))
                                 .monospace()
                                 .size(26.0)
                                 .strong()
@@ -360,7 +368,7 @@ fn recommendation_card(
 
         if !overall.description.is_empty() {
             ui.label(
-                RichText::new(&overall.description)
+                crate::i18n::rich(&overall.description)
                     .size(12.0)
                     .color(tokens.muted),
             );
@@ -369,7 +377,7 @@ fn recommendation_card(
         if !recommendation.reasons.is_empty() {
             ui.add_space(6.0);
             // Wrap whole pills; a fixed pair per row overflows a narrow phone card.
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 for reason in &recommendation.reasons {
                     components::pill(ui, reason.label(), Tone::Accent);
                 }
@@ -378,7 +386,7 @@ fn recommendation_card(
 
         if let Some(delta) = delta_text(&recommendation) {
             let faster = recommendation.delta_ms.is_some_and(|value| value >= 0.0);
-            ui.label(RichText::new(delta).size(12.0).color(if faster {
+            ui.label(crate::i18n::rich(delta).size(12.0).color(if faster {
                 tokens.success
             } else {
                 tokens.warning
@@ -386,8 +394,9 @@ fn recommendation_card(
         }
         if let Some(gap) = recommendation.close_call_ms {
             ui.label(
-                RichText::new(format!(
-                    "The top two are within {gap:.1} ms; either is a good choice."
+                crate::i18n::rich(i18n::fill(
+                    "The top two are within {} ms; either is a good choice.",
+                    &[&format!("{gap:.1}")],
                 ))
                 .size(12.0)
                 .color(tokens.warning),
@@ -402,7 +411,7 @@ fn recommendation_card(
                 .is_some_and(|row| !row.is_plain());
             if chosen_encrypted {
                 ui.label(
-                    RichText::new(
+                    crate::i18n::rich(
                         "You selected an encrypted resolver. This system can only apply a plain \
                          resolver, so choose one from the results first.",
                     )
@@ -414,9 +423,9 @@ fn recommendation_card(
             } else if let Some(target) = recommendation.best_plain.clone() {
                 if target.id != overall.id {
                     ui.label(
-                        RichText::new(format!(
+                        crate::i18n::rich(i18n::fill(
                             "Fastest applicable resolver: {} ({})",
-                            target.label, target.endpoint
+                            &[&target.label, &target.endpoint],
                         ))
                         .size(12.0)
                         .color(tokens.muted),
@@ -435,7 +444,7 @@ fn recommendation_card(
                 }
             } else {
                 ui.label(
-                    RichText::new(
+                    crate::i18n::rich(
                         "No plain resolver was measured, so this system has nothing to apply from \
                          this run.",
                     )
@@ -465,20 +474,18 @@ fn recommendation_card(
         {
             ui.separator();
             ui.label(
-                RichText::new("Best encrypted")
+                crate::i18n::rich("Best encrypted")
                     .size(11.0)
                     .color(tokens.muted),
             );
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(&encrypted.label).size(13.0).strong());
+            i18n::horizontal_wrapped(ui, |ui| {
+                ui.label(crate::i18n::rich(&encrypted.label).size(13.0).strong());
+                let latency = format!("{:.1}", encrypted.score);
                 ui.label(
-                    RichText::new(format!(
-                        "{:.1} ms · {}",
-                        encrypted.score, encrypted.endpoint
-                    ))
-                    .monospace()
-                    .size(11.5)
-                    .color(tokens.muted),
+                    crate::i18n::rich(i18n::fill("{} ms · {}", &[&latency, &encrypted.endpoint]))
+                        .monospace()
+                        .size(11.5)
+                        .color(tokens.muted),
                 );
             });
         }
@@ -500,7 +507,7 @@ fn progress_card(
 
         if state.running {
             ui.label(
-                RichText::new(
+                crate::i18n::rich(
                     state
                         .stage
                         .map_or("Preparing the benchmark", |stage| stage.label()),
@@ -516,7 +523,7 @@ fn progress_card(
             ui.add(
                 egui::ProgressBar::new(fraction)
                     .desired_width(ui.available_width())
-                    .text(format!("{done} of {total}")),
+                    .text(i18n::fill("{} of {}", &[&done, &total])),
             );
             ui.add_space(4.0);
             if components::button(ui, "Cancel", ButtonKind::Danger, touch, true).clicked() {
@@ -526,17 +533,21 @@ fn progress_card(
         }
 
         let Some(result) = &state.result else {
-            ui.label(RichText::new("No run yet").size(15.0).color(tokens.muted));
             ui.label(
-                RichText::new("The last run's duration, depth and data center appear here.")
+                crate::i18n::rich("No run yet")
+                    .size(15.0)
+                    .color(tokens.muted),
+            );
+            ui.label(
+                crate::i18n::rich("The last run's duration, depth and data center appear here.")
                     .size(12.0)
                     .color(tokens.muted),
             );
             return;
         };
 
-        ui.label(RichText::new("Last run").size(12.0).color(tokens.muted));
-        ui.horizontal_wrapped(|ui| {
+        ui.label(crate::i18n::rich("Last run").size(12.0).color(tokens.muted));
+        i18n::horizontal_wrapped(ui, |ui| {
             components::metric(
                 ui,
                 "Duration",
@@ -547,22 +558,22 @@ fn progress_card(
                 ui,
                 "Tested",
                 &result.tested.to_string(),
-                Some(&format!("of {} scanned", result.scanned)),
+                Some(&i18n::fill("of {} scanned", &[&result.scanned])),
             );
         });
         let profile = result.profile.map_or("Custom", Profile::label);
-        let mut detail = format!("Profile: {profile}");
+        let mut detail = i18n::fill("Profile: {}", &[&profile]);
         if let Some(depth) = result.depth {
-            detail.push_str(&format!(
+            detail.push_str(&i18n::fill(
                 " · {} cached rounds · {} random lookups",
-                depth.cached_rounds, depth.random_lookups
+                &[&depth.cached_rounds, &depth.random_lookups],
             ));
         }
         if let Some(data_center) = &result.data_center {
             detail.push_str(&format!(" · {data_center}"));
         }
         ui.label(
-            RichText::new(detail)
+            crate::i18n::rich(detail)
                 .monospace()
                 .size(11.5)
                 .color(tokens.muted),
@@ -589,12 +600,12 @@ fn results_card(
 ) {
     components::card(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
+        i18n::horizontal(ui, |ui| {
             card_heading(ui, Icon::Server, "Top results", tokens);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
                 let measured = state.result.as_ref().map_or(0, |result| result.rows.len());
                 ui.label(
-                    RichText::new(format!("{measured} measured"))
+                    crate::i18n::rich(i18n::fill("{} measured", &[&measured]))
                         .size(12.0)
                         .color(tokens.muted),
                 );
@@ -604,7 +615,7 @@ fn results_card(
 
         let Some(result) = &state.result else {
             ui.label(
-                RichText::new("Results appear here after a benchmark.")
+                crate::i18n::rich("Results appear here after a benchmark.")
                     .size(13.0)
                     .color(tokens.muted),
             );
@@ -623,7 +634,7 @@ fn results_card(
 
         if rows.is_empty() {
             ui.label(
-                RichText::new("This run did not produce a usable row.")
+                crate::i18n::rich("This run did not produce a usable row.")
                     .size(13.0)
                     .color(tokens.muted),
             );
@@ -640,21 +651,21 @@ fn results_card(
             .spacing([12.0, 8.0])
             .striped(true)
             .show(ui, |ui| {
-                ui.label(RichText::new("Resolver").size(11.0).color(tokens.muted));
-                ui.label(RichText::new("Score").size(11.0).color(tokens.muted));
-                ui.label(RichText::new("Security").size(11.0).color(tokens.muted));
+                ui.label(crate::i18n::rich("Resolver").size(11.0).color(tokens.muted));
+                ui.label(crate::i18n::rich("Score").size(11.0).color(tokens.muted));
+                ui.label(crate::i18n::rich("Security").size(11.0).color(tokens.muted));
                 ui.end_row();
 
                 for row in rows.iter().take(6) {
                     let selected = state.selected_row.as_deref() == Some(row.id.as_str());
                     if ui
-                        .selectable_label(selected, RichText::new(&row.label).size(13.0))
+                        .selectable_label(selected, crate::i18n::rich(&row.label).size(13.0))
                         .clicked()
                     {
                         actions.push(UiAction::ChooseRow(row.id.clone()));
                     }
                     ui.label(
-                        RichText::new(format!("{:.1} ms", row.score))
+                        crate::i18n::rich(format!("{:.1} ms", row.score))
                             .monospace()
                             .size(12.5),
                     );
@@ -683,35 +694,38 @@ fn touch_result_rows(
         let selected = state.selected_row.as_deref() == Some(row.id.as_str());
         let score_width = 74.0;
         let button_width = (ui.available_width() - score_width - 8.0).max(120.0);
-        ui.horizontal(|ui| {
+        i18n::horizontal(ui, |ui| {
             let response = ui.add_sized(
                 [button_width, 48.0],
-                egui::Button::selectable(selected, RichText::new(&row.label).size(14.0).strong())
-                    .wrap_mode(egui::TextWrapMode::Truncate)
-                    // Pin the name to the leading edge; a plain button centres it.
-                    .right_text(" "),
+                egui::Button::selectable(
+                    selected,
+                    crate::i18n::rich(&row.label).size(14.0).strong(),
+                )
+                .wrap_mode(egui::TextWrapMode::Truncate)
+                // Pin the name to the leading edge; a plain button centres it.
+                .right_text(" "),
             );
             response.widget_info(|| {
                 egui::WidgetInfo::selected(
                     egui::Role::Button,
                     true,
                     selected,
-                    format!("Choose {}", row.label),
+                    i18n::fill("Choose {}", &[&row.label]),
                 )
             });
             if response.clicked() {
                 actions.push(UiAction::ChooseRow(row.id.clone()));
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
                 ui.label(
-                    RichText::new(format!("{:.1} ms", row.score))
+                    crate::i18n::rich(format!("{:.1} ms", row.score))
                         .monospace()
                         .size(12.5)
                         .color(tokens.text),
                 );
             });
         });
-        ui.horizontal_wrapped(|ui| {
+        i18n::horizontal_wrapped(ui, |ui| {
             components::pill(
                 ui,
                 security_label(row.security_status()),
@@ -751,13 +765,16 @@ fn delta_text(recommendation: &Recommendation) -> Option<String> {
         .map(|value| format!(" ({value:.0}%)"))
         .unwrap_or_default();
     if delta > 0.0 {
-        Some(format!(
-            "{delta:.1} ms faster than your current DNS{percentage}"
+        let delta = format!("{delta:.1}");
+        Some(i18n::fill(
+            "{} ms faster than your current DNS{}",
+            &[&delta, &percentage],
         ))
     } else {
-        Some(format!(
-            "{:.1} ms slower than your current DNS{percentage}",
-            -delta
+        let delta = format!("{:.1}", -delta);
+        Some(i18n::fill(
+            "{} ms slower than your current DNS{}",
+            &[&delta, &percentage],
         ))
     }
 }

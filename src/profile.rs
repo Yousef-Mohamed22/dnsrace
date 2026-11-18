@@ -65,22 +65,22 @@ impl Profile {
         Profile::Custom,
     ];
 
-    pub const fn label(self) -> &'static str {
-        match self {
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
             Profile::Quick => "Quick",
             Profile::Balanced => "Balanced",
             Profile::Thorough => "Thorough",
             Profile::Custom => "Custom",
-        }
+        })
     }
 
-    pub const fn description(self) -> &'static str {
-        match self {
+    pub fn description(self) -> &'static str {
+        crate::i18n::t(match self {
             Profile::Quick => "A fast pass with fewer rounds. Good for a first look.",
             Profile::Balanced => "The default balance of speed and confidence.",
             Profile::Thorough => "More rounds and random names for a steadier ranking.",
             Profile::Custom => "Your own timeout, concurrency and depth values.",
-        }
+        })
     }
 
     pub const fn values(self) -> Option<ProfileValues> {

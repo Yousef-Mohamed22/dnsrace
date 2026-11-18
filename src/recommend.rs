@@ -20,14 +20,14 @@ pub enum Reason {
 }
 
 impl Reason {
-    pub const fn label(self) -> &'static str {
-        match self {
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
             Reason::Fastest => "Fastest measured resolver",
             Reason::DnssecValidated => "Validates DNSSEC",
             Reason::NoHijack => "Does not hijack NXDOMAIN",
             Reason::LowJitter => "Stable latency",
             Reason::Encrypted => "Encrypted transport",
-        }
+        })
     }
 }
 

@@ -4,7 +4,7 @@
 //! Only one dialog is shown at a time, and Escape closes the topmost one. Everything here emits
 //! `UiAction`s; the app owns validation, persistence and platform calls.
 
-use eframe::egui::{self, Frame, Id, Margin, RichText, Stroke};
+use eframe::egui::{self, Frame, Id, Margin, Stroke};
 
 use crate::android_guide::GuideMode;
 use crate::gui::actions::{RunScope, UiAction};
@@ -12,6 +12,7 @@ use crate::gui::components::{self, ButtonKind, Tone};
 use crate::gui::icons::{self, Icon};
 use crate::gui::state::{AppState, LayoutMode, ViewContext};
 use crate::gui::theme::{self, Tokens};
+use crate::i18n;
 use crate::servers::Protocol;
 
 const DIALOG_WIDTH: f32 = 470.0;
@@ -107,10 +108,10 @@ fn text_field(
     tokens: Tokens,
     touch: bool,
 ) {
-    let label = ui.label(RichText::new(label).size(11.0).color(tokens.muted));
+    let label = ui.label(crate::i18n::rich(label).size(11.0).color(tokens.muted));
     ui.add_sized(
         [ui.available_width(), field_height(touch)],
-        egui::TextEdit::singleline(value).hint_text(hint),
+        egui::TextEdit::singleline(value).hint_text(crate::i18n::t(hint)),
     )
     .labelled_by(label.id);
 }
@@ -127,7 +128,7 @@ fn custom_editor(
     dialog("custom-resolver-dialog", tokens).show(ctx, |ui| {
         dialog_body(ctx, ui, "custom-resolver-scroll", |ui| {
             ui.label(
-                RichText::new(if editing {
+                crate::i18n::rich(if editing {
                     "Edit custom resolver"
                 } else {
                     "Add custom resolver"
@@ -137,7 +138,7 @@ fn custom_editor(
                 .color(tokens.text),
             );
             ui.label(
-                RichText::new(
+                crate::i18n::rich(
                     "Custom resolvers are tested exactly like built-in servers. Plain, DoT and DoH \
                  endpoints are supported.",
                 )
@@ -166,7 +167,7 @@ fn custom_editor(
                         touch,
                     );
                     ui.label(
-                    RichText::new(
+                    crate::i18n::rich(
                         "Custom ports are useful for testing; the Apply button only accepts port \
                          53.",
                     )
@@ -211,7 +212,7 @@ fn custom_editor(
             }
 
             ui.add_space(14.0);
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 if components::button(ui, "Cancel custom resolver", ButtonKind::Ghost, touch, true)
                     .clicked()
                 {
@@ -267,17 +268,26 @@ fn guide_sheet(
 
     dialog("android-guide-dialog", tokens).show(ctx, |ui| {
         dialog_body(ctx, ui, "android-guide-scroll", |ui| {
-            ui.horizontal(|ui| {
+            i18n::horizontal(ui, |ui| {
                 icons::paint_in(ui, Icon::Info, 20.0, tokens.accent, egui::Sense::hover());
-                ui.label(RichText::new(title).size(20.0).strong().color(tokens.text));
+                ui.label(
+                    crate::i18n::rich(title)
+                        .size(20.0)
+                        .strong()
+                        .color(tokens.text),
+                );
             });
             ui.add_space(6.0);
-            ui.label(RichText::new(&guide.note).size(12.5).color(tokens.muted));
+            ui.label(
+                crate::i18n::rich(&guide.note)
+                    .size(12.5)
+                    .color(tokens.muted),
+            );
 
             if !value.is_empty() {
                 ui.add_space(10.0);
                 ui.label(
-                    RichText::new(if guide.mode == GuideMode::PrivateDns {
+                    crate::i18n::rich(if guide.mode == GuideMode::PrivateDns {
                         "Hostname"
                     } else {
                         "DNS addresses"
@@ -286,7 +296,7 @@ fn guide_sheet(
                     .color(tokens.muted),
                 );
                 ui.label(
-                    RichText::new(&value)
+                    crate::i18n::rich(&value)
                         .monospace()
                         .size(15.0)
                         .strong()
@@ -294,7 +304,7 @@ fn guide_sheet(
                 );
                 if guide.mode == GuideMode::PrivateDns {
                     ui.label(
-                        RichText::new(if guide.hostname_is_measured {
+                        crate::i18n::rich(if guide.hostname_is_measured {
                             "Measured with DNS-over-TLS in this run."
                         } else {
                             "From provider metadata. Run DNS-over-TLS to measure it directly."
@@ -307,9 +317,9 @@ fn guide_sheet(
 
             ui.add_space(10.0);
             for (index, step) in guide.steps.iter().enumerate() {
-                ui.horizontal_top(|ui| {
+                i18n::horizontal_top(ui, |ui| {
                     ui.label(
-                        RichText::new(format!("{}.", index + 1))
+                        crate::i18n::rich(format!("{}.", index + 1))
                             .monospace()
                             .size(12.0)
                             .color(tokens.accent),
@@ -317,13 +327,14 @@ fn guide_sheet(
                     // A horizontal layout hands its children the full row, so the step text
                     // must be explicitly wrapped or a long instruction widens the whole sheet.
                     ui.add(
-                        egui::Label::new(RichText::new(step).size(12.5).color(tokens.text)).wrap(),
+                        egui::Label::new(crate::i18n::rich(step).size(12.5).color(tokens.text))
+                            .wrap(),
                     );
                 });
             }
 
             ui.add_space(14.0);
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 if !value.is_empty()
                     && components::button(ui, "Copy setup value", ButtonKind::Primary, touch, true)
                         .clicked()
@@ -412,19 +423,19 @@ fn apply_confirm(
     dialog("apply-confirm-dialog", tokens).show(ctx, |ui| {
         dialog_body(ctx, ui, "apply-confirm-scroll", |ui| {
             ui.label(
-                RichText::new("Change system DNS?")
+                crate::i18n::rich("Change system DNS?")
                     .size(20.0)
                     .strong()
                     .color(tokens.text),
             );
             ui.add_space(4.0);
             ui.label(
-                RichText::new(format!("dnsrace will use {}", pending.label))
+                crate::i18n::rich(i18n::fill("dnsrace will use {}", &[&pending.label]))
                     .size(13.0)
                     .color(tokens.text),
             );
             ui.label(
-                RichText::new(
+                crate::i18n::rich(
                     pending
                         .addresses
                         .iter()
@@ -444,7 +455,7 @@ fn apply_confirm(
 
             ui.add_space(8.0);
             ui.label(
-                RichText::new(
+                crate::i18n::rich(
                     "Your system may ask for administrator permission. The previous settings are \
                  saved so you can restore them here.",
                 )
@@ -453,7 +464,7 @@ fn apply_confirm(
             );
 
             ui.add_space(14.0);
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 if components::button(ui, "Cancel apply", ButtonKind::Ghost, touch, true).clicked()
                 {
                     actions.push(UiAction::CancelApply);
@@ -476,7 +487,7 @@ fn revert_confirm(
     dialog("revert-confirm-dialog", tokens).show(ctx, |ui| {
         dialog_body(ctx, ui, "revert-confirm-scroll", |ui| {
             ui.label(
-                RichText::new("Restore previous DNS?")
+                crate::i18n::rich("Restore previous DNS?")
                     .size(20.0)
                     .strong()
                     .color(tokens.text),
@@ -484,26 +495,26 @@ fn revert_confirm(
             ui.add_space(4.0);
             if let Some(applied) = &state.applied {
                 ui.label(
-                    RichText::new("dnsrace will restore the settings saved when it applied:")
+                    crate::i18n::rich("dnsrace will restore the settings saved when it applied:")
                         .size(12.5)
                         .color(tokens.text),
                 );
                 ui.label(
-                    RichText::new(applied.summary())
+                    crate::i18n::rich(applied.summary())
                         .monospace()
                         .size(12.0)
                         .color(tokens.muted),
                 );
             } else {
                 ui.label(
-                    RichText::new("No saved DNS change was found.")
+                    crate::i18n::rich("No saved DNS change was found.")
                         .size(12.5)
                         .color(tokens.muted),
                 );
             }
             ui.add_space(8.0);
             ui.label(
-                RichText::new(
+                crate::i18n::rich(
                     "Your system may ask for administrator permission. If the saved settings are \
                  unavailable, the connection's automatic DNS is restored.",
                 )
@@ -512,7 +523,7 @@ fn revert_confirm(
             );
 
             ui.add_space(14.0);
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 if components::button(ui, "Cancel revert", ButtonKind::Ghost, touch, true).clicked()
                 {
                     actions.push(UiAction::CancelRevert);
@@ -527,7 +538,7 @@ fn revert_confirm(
 }
 
 fn field_label(ui: &mut egui::Ui, text: &str, tokens: Tokens) {
-    ui.label(RichText::new(text).size(11.0).color(tokens.muted));
+    ui.label(crate::i18n::rich(text).size(11.0).color(tokens.muted));
 }
 
 /// A compact row-detail sheet used by the mobile shell. Desktop keeps its persistent detail
@@ -580,7 +591,10 @@ pub fn row_detail_sheet(
                 |ui| {
                     ui.add(
                         egui::Label::new(
-                            RichText::new(&label).size(20.0).strong().color(tokens.text),
+                            crate::i18n::rich(&label)
+                                .size(20.0)
+                                .strong()
+                                .color(tokens.text),
                         )
                         .truncate(),
                     );
@@ -594,18 +608,22 @@ pub fn row_detail_sheet(
                 },
             );
             ui.label(
-                RichText::new(&endpoint)
+                crate::i18n::rich(&endpoint)
                     .monospace()
                     .size(12.0)
                     .color(tokens.muted),
             );
             if !description.is_empty() {
                 ui.add_space(6.0);
-                ui.label(RichText::new(&description).size(12.5).color(tokens.text));
+                ui.label(
+                    crate::i18n::rich(&description)
+                        .size(12.5)
+                        .color(tokens.text),
+                );
             }
             ui.add_space(8.0);
             if let Some(row) = measured {
-                ui.horizontal_wrapped(|ui| {
+                i18n::horizontal_wrapped(ui, |ui| {
                     components::metric(
                         ui,
                         "Cached",
@@ -631,7 +649,7 @@ pub fn row_detail_sheet(
                 components::pill(ui, "Not measured yet", Tone::Neutral);
             }
             ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
+            i18n::horizontal_wrapped(ui, |ui| {
                 if components::button(ui, "Choose this resolver", ButtonKind::Primary, true, true)
                     .clicked()
                 {
@@ -690,7 +708,7 @@ pub fn row_detail_sheet(
             });
             ui.add_space(6.0);
             ui.label(
-                RichText::new("Details close with Escape or the close button.")
+                crate::i18n::rich("Details close with Escape or the close button.")
                     .size(11.0)
                     .color(tokens.muted),
             );

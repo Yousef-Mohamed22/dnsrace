@@ -4,7 +4,7 @@
 //! Content keeps the shared page state and actions. The shell only changes framing, spacing and
 //! touch sizes, so a control tested on desktop has the same effect here.
 
-use eframe::egui::{self, Align, Color32, Layout, Pos2, Rect, RichText, Sense, Vec2};
+use eframe::egui::{self, Align, Color32, Pos2, Rect, Sense, Vec2};
 
 use crate::gui::actions::{Page, RunScope, UiAction};
 use crate::gui::components::{self, ButtonKind};
@@ -12,6 +12,7 @@ use crate::gui::icons::{self, Icon};
 use crate::gui::pages;
 use crate::gui::state::{AppState, ViewContext};
 use crate::gui::theme::{self, Tokens};
+use crate::i18n;
 
 const NAV_HEIGHT: f32 = 64.0;
 const TAB_HEIGHT: f32 = 56.0;
@@ -119,16 +120,16 @@ fn app_bar(
     tokens: Tokens,
 ) {
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
+    i18n::horizontal(ui, |ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
         if ui.is_rect_visible(rect) {
             icons::paint_logo(ui.painter(), rect);
         }
-        ui.vertical(|ui| {
-            ui.label(RichText::new("dnsrace").size(18.0).strong());
-            ui.label(RichText::new(cx.version).size(11.0).color(tokens.muted));
+        i18n::vertical(ui, |ui| {
+            ui.label(crate::i18n::rich("dnsrace").size(18.0).strong());
+            ui.label(crate::i18n::rich(cx.version).size(11.0).color(tokens.muted));
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.with_layout(i18n::trailing_layout(Align::Center), |ui| {
             if components::button(
                 ui,
                 "Run benchmark",
@@ -157,58 +158,54 @@ fn bottom_nav(
     tokens: Tokens,
     width: f32,
 ) {
-    ui.allocate_ui_with_layout(
-        Vec2::new(width, NAV_HEIGHT),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            // Tabs divide the row exactly; the default item spacing would push the last tab
-            // past the phone width.
-            ui.spacing_mut().item_spacing.x = 0.0;
-            let tab_width = width / Page::ALL.len() as f32;
-            for page in Page::ALL {
-                let (rect, response) =
-                    ui.allocate_exact_size(Vec2::new(tab_width, TAB_HEIGHT), Sense::click());
-                if ui.is_rect_visible(rect) {
-                    if state.page == page {
-                        let indicator = Rect::from_min_size(
-                            Pos2::new(rect.center().x - 16.0, rect.top()),
-                            Vec2::new(32.0, 3.0),
-                        );
-                        ui.painter().rect_filled(indicator, 2.0, tokens.accent);
-                    }
-                    let color = if state.page == page {
-                        tokens.accent
-                    } else {
-                        tokens.muted
-                    };
-                    let icon_rect = Rect::from_center_size(
-                        Pos2::new(rect.center().x, rect.top() + 20.0),
-                        Vec2::splat(21.0),
+    ui.allocate_ui_with_layout(Vec2::new(width, NAV_HEIGHT), i18n::row_layout(), |ui| {
+        // Tabs divide the row exactly; the default item spacing would push the last tab
+        // past the phone width.
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let tab_width = width / Page::ALL.len() as f32;
+        for page in Page::ALL {
+            let (rect, response) =
+                ui.allocate_exact_size(Vec2::new(tab_width, TAB_HEIGHT), Sense::click());
+            if ui.is_rect_visible(rect) {
+                if state.page == page {
+                    let indicator = Rect::from_min_size(
+                        Pos2::new(rect.center().x - 16.0, rect.top()),
+                        Vec2::new(32.0, 3.0),
                     );
-                    icons::paint_at(ui.painter(), page_icon(page), icon_rect, color);
-                    ui.painter().text(
-                        Pos2::new(rect.center().x, rect.top() + 40.0),
-                        egui::Align2::CENTER_CENTER,
-                        page.label(),
-                        egui::FontId::proportional(11.0),
-                        color,
-                    );
+                    ui.painter().rect_filled(indicator, 2.0, tokens.accent);
                 }
-                response.widget_info(|| {
-                    egui::WidgetInfo::selected(
-                        egui::Role::Button,
-                        true,
-                        state.page == page,
-                        page.label(),
-                    )
-                });
-                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-                if response.clicked() && state.page != page {
-                    actions.push(UiAction::Navigate(page));
-                }
+                let color = if state.page == page {
+                    tokens.accent
+                } else {
+                    tokens.muted
+                };
+                let icon_rect = Rect::from_center_size(
+                    Pos2::new(rect.center().x, rect.top() + 20.0),
+                    Vec2::splat(21.0),
+                );
+                icons::paint_at(ui.painter(), page_icon(page), icon_rect, color);
+                ui.painter().text(
+                    Pos2::new(rect.center().x, rect.top() + 40.0),
+                    egui::Align2::CENTER_CENTER,
+                    page.label(),
+                    egui::FontId::proportional(11.0),
+                    color,
+                );
             }
-        },
-    );
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::Role::Button,
+                    true,
+                    state.page == page,
+                    page.label(),
+                )
+            });
+            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.clicked() && state.page != page {
+                actions.push(UiAction::Navigate(page));
+            }
+        }
+    });
 }
 
 fn page_icon(page: Page) -> Icon {

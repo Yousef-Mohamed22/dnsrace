@@ -3,9 +3,7 @@
 //! Components own their sizing rules: a touch control never drops below 44 points, while a
 //! desktop control stays at the 40-point density the rest of the window uses.
 
-use eframe::egui::{
-    self, Align, Color32, Layout, Margin, RichText, Sense, Stroke, StrokeKind, Vec2,
-};
+use eframe::egui::{self, Align, Color32, Layout, Margin, Sense, Stroke, StrokeKind, Vec2};
 
 use crate::gui::icons::{self, Icon};
 
@@ -65,7 +63,7 @@ pub fn button(
         ButtonKind::Ghost => (Color32::TRANSPARENT, Stroke::NONE, text_color),
         ButtonKind::Danger => (DANGER, Stroke::NONE, ON_DANGER),
     };
-    let text = RichText::new(label)
+    let text = crate::i18n::rich(label)
         .size(if touch { 16.0 } else { 14.0 })
         .color(label_color);
     let widget = egui::Button::new(text)
@@ -78,6 +76,7 @@ pub fn button(
 
 /// An icon-only button with a tooltip and an accessible name.
 pub fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str, touch: bool) -> egui::Response {
+    let tooltip = crate::i18n::t(tooltip);
     let size = if touch { TOUCH_MIN } else { 32.0 };
     let response = icons::paint_in(ui, icon, size, ui.visuals().text_color(), Sense::click());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tooltip));
@@ -85,7 +84,7 @@ pub fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str, touch: bool) ->
 }
 
 /// A flat card surface with a one-pixel border.
-pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) {
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
         .stroke(Stroke::new(
@@ -94,7 +93,9 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui:
         ))
         .corner_radius(12.0)
         .inner_margin(Margin::same(16))
-        .show(ui, add)
+        .show(ui, |ui| {
+            ui.with_layout(Layout::top_down(crate::i18n::align()), add);
+        });
 }
 
 fn tone_colors(ui: &egui::Ui, tone: Tone) -> (Color32, Color32) {
@@ -112,6 +113,7 @@ fn tone_colors(ui: &egui::Ui, tone: Tone) -> (Color32, Color32) {
 
 /// A compact status pill.
 pub fn pill(ui: &mut egui::Ui, text: &str, tone: Tone) {
+    let text = crate::i18n::t(text);
     let (color, fill) = tone_colors(ui, tone);
     // Paint the pill directly instead of nesting a Label in a Frame. A Frame does not
     // report its width before placement, which makes wrapping rows place pills past the
@@ -148,7 +150,7 @@ pub fn notice(ui: &mut egui::Ui, text: &str, error: bool) {
             // A horizontal layout extends labels by default, so a long "Finished: Current DNS
             // (...)" notice used to widen the whole scroll page past the phone screen. Wrap the
             // text explicitly and keep the icon beside the first line.
-            ui.horizontal_top(|ui| {
+            crate::i18n::horizontal_top(ui, |ui| {
                 ui.add_space(2.0);
                 icons::paint_in(
                     ui,
@@ -157,7 +159,7 @@ pub fn notice(ui: &mut egui::Ui, text: &str, error: bool) {
                     color,
                     Sense::hover(),
                 );
-                ui.add(egui::Label::new(RichText::new(text).size(12.5).color(color)).wrap());
+                ui.add(egui::Label::new(crate::i18n::rich(text).size(12.5).color(color)).wrap());
             });
         });
 }
@@ -175,7 +177,7 @@ pub fn chip(ui: &mut egui::Ui, label: &str, selected: bool, touch: bool) -> egui
     } else {
         Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color)
     };
-    let text = RichText::new(label)
+    let text = crate::i18n::rich(label)
         .size(if touch { 14.0 } else { 12.0 })
         .color(if selected {
             ACCENT
@@ -193,21 +195,21 @@ pub fn chip(ui: &mut egui::Ui, label: &str, selected: bool, touch: bool) -> egui
 
 /// A label, a prominent value and an optional hint.
 pub fn metric(ui: &mut egui::Ui, label: &str, value: &str, hint: Option<&str>) {
-    ui.vertical(|ui| {
+    crate::i18n::vertical(ui, |ui| {
         ui.label(
-            RichText::new(label)
+            crate::i18n::rich(label)
                 .size(12.0)
                 .color(ui.visuals().weak_text_color()),
         );
         ui.label(
-            RichText::new(value)
+            crate::i18n::rich(value)
                 .size(20.0)
                 .strong()
                 .color(ui.visuals().text_color()),
         );
         if let Some(hint) = hint {
             ui.label(
-                RichText::new(hint)
+                crate::i18n::rich(hint)
                     .size(12.0)
                     .color(ui.visuals().weak_text_color()),
             );
@@ -229,8 +231,9 @@ pub fn segmented<T: Copy + PartialEq>(
         let add = |ui: &mut egui::Ui| {
             for (option, label) in options {
                 let selected = *value == *option;
+                let label = crate::i18n::t(label);
                 let response = ui.add(
-                    egui::Button::selectable(selected, *label).min_size(Vec2::new(0.0, height)),
+                    egui::Button::selectable(selected, label).min_size(Vec2::new(0.0, height)),
                 );
                 if response.clicked() && !selected {
                     *value = *option;
@@ -250,9 +253,10 @@ pub fn segmented<T: Copy + PartialEq>(
                 .show(ui, |ui| {
                     for (index, (option, label)) in options.iter().enumerate() {
                         let selected = *value == *option;
+                        let label = crate::i18n::t(label);
                         let response = ui.add_sized(
                             Vec2::new(width, height),
-                            egui::Button::selectable(selected, *label),
+                            egui::Button::selectable(selected, label),
                         );
                         if response.clicked() && !selected {
                             *value = *option;
@@ -264,7 +268,7 @@ pub fn segmented<T: Copy + PartialEq>(
                     }
                 });
         } else {
-            ui.horizontal(add);
+            crate::i18n::horizontal(ui, add);
         }
     });
     changed
@@ -277,7 +281,7 @@ pub fn search_field(ui: &mut egui::Ui, id: &str, query: &mut String, hint: &str)
         [ui.available_width(), height],
         egui::TextEdit::singleline(query)
             .id_salt(id)
-            .hint_text(hint)
+            .hint_text(crate::i18n::t(hint))
             .margin(Vec2::new(10.0, 8.0)),
     )
 }
@@ -289,23 +293,23 @@ pub fn page_header(
     subtitle: &str,
     actions: impl FnOnce(&mut egui::Ui),
 ) {
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
+    crate::i18n::horizontal(ui, |ui| {
+        crate::i18n::vertical(ui, |ui| {
             ui.label(
-                RichText::new(title)
+                crate::i18n::rich(title)
                     .size(20.0)
                     .strong()
                     .color(ui.visuals().text_color()),
             );
             if !subtitle.is_empty() {
                 ui.label(
-                    RichText::new(subtitle)
+                    crate::i18n::rich(subtitle)
                         .size(13.0)
                         .color(ui.visuals().weak_text_color()),
                 );
             }
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), actions);
+        ui.with_layout(crate::i18n::trailing_layout(Align::Center), actions);
     });
 }
 

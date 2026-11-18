@@ -18,16 +18,7 @@ struct DesktopState {
 }
 
 fn harness() -> Harness<'static, DesktopState> {
-    Harness::new_ui_state(
-        |ui, state: &mut DesktopState| {
-            render_desktop(&mut state.state, &state.cx, ui, &mut state.actions);
-        },
-        DesktopState {
-            state: AppState::demo(),
-            cx: ViewContext::desktop_for_test(),
-            actions: Vec::new(),
-        },
-    )
+    page_harness(Page::Overview, |_| {})
 }
 
 fn servers_harness(configure: impl FnOnce(&mut AppState)) -> Harness<'static, DesktopState> {
@@ -49,16 +40,19 @@ fn page_harness(
     let mut state = AppState::demo();
     state.page = page;
     configure(&mut state);
-    Harness::new_ui_state(
-        |ui, state: &mut DesktopState| {
-            render_desktop(&mut state.state, &state.cx, ui, &mut state.actions);
-        },
-        DesktopState {
-            state,
-            cx: ViewContext::desktop_for_test(),
-            actions: Vec::new(),
-        },
-    )
+    Harness::builder()
+        .with_size(eframe::egui::Vec2::new(1280.0, 840.0))
+        .with_context_setup(|ctx| crate::gui::theme::install(ctx, Theme::Dark))
+        .build_ui_state(
+            |ui, state: &mut DesktopState| {
+                render_desktop(&mut state.state, &state.cx, ui, &mut state.actions);
+            },
+            DesktopState {
+                state,
+                cx: ViewContext::desktop_for_test(),
+                actions: Vec::new(),
+            },
+        )
 }
 
 #[test]
@@ -320,7 +314,7 @@ fn settings_reset_emits_action() {
 fn about_shows_version_and_closes() {
     let mut harness = settings_harness(|state| state.about_open = true);
     harness.run();
-    harness.get_by_label("Version 0.8.0");
+    harness.get_by_label("Version 0.9.0");
     harness.get_by_label("Close about").click();
     harness.run();
     assert!(harness.state().actions.contains(&UiAction::CloseAbout));

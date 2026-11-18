@@ -45,8 +45,8 @@ pub enum Category {
 }
 
 impl Category {
-    pub const fn label(self) -> &'static str {
-        match self {
+    pub fn label(self) -> &'static str {
+        crate::i18n::t(match self {
             Category::General => "General",
             Category::Security => "Security",
             Category::Family => "Family",
@@ -54,7 +54,7 @@ impl Category {
             Category::Uncensored => "Uncensored",
             Category::System => "System",
             Category::Custom => "Custom",
-        }
+        })
     }
 }
 
@@ -81,7 +81,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Protocol::Udp => "UDP",
             Protocol::Tcp => "TCP",
@@ -90,13 +90,13 @@ impl Protocol {
         }
     }
 
-    pub const fn description(self) -> &'static str {
-        match self {
+    pub fn description(self) -> &'static str {
+        crate::i18n::t(match self {
             Protocol::Udp => "Standard DNS on port 53, the default",
             Protocol::Tcp => "DNS over TCP, for networks that block UDP port 53",
             Protocol::Dot => "Encrypted DNS over TLS on port 853",
             Protocol::Doh => "Encrypted DNS over HTTPS (RFC 8484)",
-        }
+        })
     }
 
     pub const fn is_plain(self) -> bool {
@@ -122,7 +122,7 @@ pub enum Family {
 }
 
 impl Family {
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Family::Any => "IPv4 + IPv6",
             Family::V4 => "IPv4",

@@ -29,7 +29,7 @@ fn now() -> u64 {
 }
 
 fn security(row: &Row) -> &'static str {
-    row.security_status().label()
+    row.security_status().label_en()
 }
 
 fn row_value(row: &Row, rank: usize) -> Value {
@@ -54,7 +54,7 @@ fn row_value(row: &Row, rank: usize) -> Value {
         "cached_max_ms": row.cached_max,
         "cached_jitter_ms": row.cached_jitter,
         "timeouts": row.timeouts,
-        "note": row.note.label(),
+        "note": row.note.label_en(),
         "healthy": row.healthy(),
         "recommendable": row.recommendable(),
         "dnssec_ad": row.dnssec,
@@ -192,7 +192,7 @@ dnssec_rejects_bogus,security\n",
             csv_num(row.cached_max),
             csv_num(row.cached_jitter),
             row.timeouts,
-            csv_field(row.note.label()),
+            csv_field(row.note.label_en()),
             row.healthy(),
             row.recommendable(),
             csv_opt_bool(row.dnssec),
@@ -303,7 +303,7 @@ pub fn html(result: &RunResult) -> String {
             fmt_ms(row.cached),
             fmt_ms(row.uncached),
             fmt_ms(Some(row.score)),
-            escape(row.note.label()),
+            escape(row.note.label_en()),
             security_class(row),
             escape(security(row)),
             status,

@@ -13,6 +13,7 @@ use crate::platform::{AppliedDns, Capabilities};
 use crate::recommend::{self, Recommendation};
 use crate::servers::{Candidate, Category, Family, Kind, Protocol, Target};
 use crate::system::SystemInfo;
+use crate::update::ReleaseInfo;
 
 use super::actions::{Page, RunScope};
 
@@ -39,7 +40,7 @@ impl ViewContext {
         ViewContext {
             capabilities: Capabilities::desktop_for_test(),
             layout: LayoutMode::Desktop,
-            version: "0.8.0",
+            version: env!("CARGO_PKG_VERSION"),
             safe_area: SafeArea::ZERO,
         }
     }
@@ -48,7 +49,7 @@ impl ViewContext {
         ViewContext {
             capabilities: Capabilities::android_for_test(api_level),
             layout: LayoutMode::Mobile,
-            version: "0.8.0",
+            version: env!("CARGO_PKG_VERSION"),
             safe_area: SafeArea::ZERO,
         }
     }
@@ -101,6 +102,29 @@ pub struct PendingApply {
     pub warning: Option<String>,
 }
 
+/// Where the update flow stands. The release itself is kept for the version and release notes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UpdatePhase {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Available,
+    Downloading,
+    Verifying,
+    Installing,
+    Restarting,
+    Failed,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UpdateState {
+    pub phase: UpdatePhase,
+    pub release: Option<ReleaseInfo>,
+    pub progress: Option<(u64, Option<u64>)>,
+    pub error: Option<String>,
+}
+
 /// Everything the interface knows and shows.
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -144,6 +168,9 @@ pub struct AppState {
     pub detecting: bool,
     pub applying: bool,
     pub reverting: bool,
+    pub update: UpdateState,
+    /// A file chosen for resolver import. Blank means the default export path.
+    pub import_path: String,
 }
 
 impl AppState {
@@ -189,6 +216,8 @@ impl AppState {
             detecting: false,
             applying: false,
             reverting: false,
+            update: UpdateState::default(),
+            import_path: String::new(),
         }
     }
 

@@ -4,6 +4,74 @@ All notable changes to dnsrace are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-11-17
+
+### Added
+
+- **Full Arabic interface and right-to-left layout.** Every desktop page, dialog, mobile shell,
+  settings card, notice and Android setup step is translated. Settings offers System, English and
+  Arabic; Arabic mirrors the desktop rail, phone navigation, cards, result rows and table
+  alignment. Noto Sans Arabic is bundled under the SIL Open Font License, so Arabic renders
+  without a system font.
+- **In-app updates.** dnsrace checks the latest GitHub release at startup (optional) and on
+  demand from Settings. Linux AppImage, Windows and macOS downloads are verified against the
+  release `SHA256SUMS.txt` before an in-place install and restart. Android opens the APK
+  download link in the browser. Failed checks, downloads or checksums leave the current version
+  untouched.
+- **Headless benchmark CLI.** `dnsrace --cli` reuses the GUI engine for protocol, family, profile,
+  timeout, jobs, repeat, catalogue selection and system-DNS inclusion. It prints a ranked table to
+  stdout, progress to stderr, and writes optional JSON or CSV reports. `--list`, `--help` and
+  `--version` are included.
+- **Resolver and favourite transfer.** Settings → Data exports custom resolvers and favourites to
+  JSON and imports them with duplicate and protocol validation.
+- **Diagnostics report.** A copyable text report includes version, OS and architecture, language,
+  theme, profile and depth, current DNS, last run, update state, saved-data counts and config
+  paths.
+- **Rust 1.100.0** in `Cargo.toml`, `rust-toolchain.toml` and all CI, snapshot and release
+  workflows.
+- **Tests** for language selection and RTL helpers, update version comparison and checksum
+  parsing, resolver transfer validation, diagnostics content and the new Settings controls.
+
+### Changed
+
+- **The Settings page gains Language, Updates, Diagnostics and resolver import/export cards.**
+  The update check can be disabled for offline or metered systems.
+- **The desktop and phone shells mirror for Arabic.** Card content follows the leading edge,
+  wrapped rows reverse, and the mobile page header, notices and action groups align right.
+- **Android guide text follows the saved language** while resolver names and technical values
+  stay in Latin script.
+- **JSON and CSV report keys stay English** so scripts and saved reports remain stable across
+  interface languages.
+- **Linux uses native Wayland first and falls back to X11 only when no compositor is
+  reachable**, even when XWayland is present.
+- **Packaging helpers are Rust too.** Icon generation and AppImage assembly moved from shell
+  scripts to the repository-local `xtask`, so the repository contains no shell scripts.
+- README, Arabic README, AppStream metadata and release notes describe 0.9.0.
+
+### Fixed
+
+- **`applied_age` no longer says “1 days ago”.** A single day uses the singular form.
+- **Duplicate Android 8.0 clipboard bullet removed** from the 0.8.0 changelog.
+- **The custom-resolver Edit and Remove buttons use translated labels** without overflowing
+  narrow phone rows.
+- **Long Arabic notices, checklist rows and update release notes wrap** instead of widening the
+  page or painting over adjacent controls.
+- **The update failure notice distinguishes a failed check from a failed install**, and the
+  Settings card always offers a retry after a failure.
+
+### Updated
+
+- Version **0.9.0**; minimum and tested Rust **1.100.0**.
+- CI and release workflows pin **1.100.0** and keep the Android API 36, build-tools 36.0.0 and
+  NDK 30.0.16248370 toolchain.
+
+### Verified
+
+- Unit and engine integration tests pass on Rust 1.100.0.
+- `cargo fmt --all -- --check` and `cargo clippy --all-targets --locked -- -D warnings` are
+  clean.
+- `cargo build --release --locked` succeeds for desktop.
+
 ## [0.8.0] - 2026-11-11
 
 ### Added
@@ -81,10 +149,6 @@ All notable changes to dnsrace are listed here. The format follows
   Looper.prepare()” stack trace on API 26.
 - **The filled favourite star is a proper five-point star.** epaint fills only convex paths, so
   the concave star is now drawn as a centre fan instead of a distorted convex polygon.
-- **Copy works on Android 8.0.** `ClipboardManager` constructs a `Handler` on the calling
-  thread there, so the JNI thread now prepares a Looper before requesting the service. Without
-  this, Copy produced a “Can't create handler inside thread that has not called
-  Looper.prepare()” stack trace on API 26.
 - **The row-detail sheet starts at the top every time.** It now uses a fresh scroll identity per
   opening instead of inheriting the previous sheet's offset, which could clip the title.
 
