@@ -2,8 +2,7 @@
 
 [English](README.md) · [العربية](README_AR.md)
 
-<img width="1366" height="768" alt="dnsrace showdown" src="https://github.com/user-attachments/assets/c5732c9f-0beb-4d06-b08b-f6bbf7a801e6" />
-
+<img width="1366" height="768" alt="dnsrace العربية" src="https://github.com/user-attachments/assets/7889f766-caaf-4b55-95a8-90d0a61417c0" />
 > اعثر على أسرع خادم DNS **لاتصالك أنت**، ثم طبّقه بنقرة واحدة.
 
 أفضل خادم DNS يعتمد على مكانك وعلى مسار حركة المرور لدى مزود الإنترنت، لذلك لا تستطيع قائمة
