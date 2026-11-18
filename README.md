@@ -2,7 +2,7 @@
 
 [English](README.md) · [العربية](README_AR.md)
 
-<img width="1366" height="768" alt="dnsrace showdown" src="https://github.com/user-attachments/assets/c5732c9f-0beb-4d06-b08b-f6bbf7a801e6" />
+<img width="1366" height="768" alt="dnsrace english" src="https://github.com/user-attachments/assets/486b0131-caeb-4f0d-a6bd-bb2033ae7d20" />
 
 > Find the fastest DNS resolver for **your** connection, then apply it in one click.
 
