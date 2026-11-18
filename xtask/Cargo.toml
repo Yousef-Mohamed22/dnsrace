@@ -6,4 +6,4 @@ rust-version = "1.100.0"
 publish = false
 
 [dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
